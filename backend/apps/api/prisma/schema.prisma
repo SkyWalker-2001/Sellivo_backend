@@ -465,6 +465,9 @@ model PosSale {
   discountCents   Int       @default(0)
   taxCents        Int       @default(0)
   totalCents      Int
+  paymentMethod   String    @default("cash") // cash | upi | card
+  customerName    String?
+  customerPhone   String?
   offlineCreatedAt DateTime
   syncedAt        DateTime?
   createdAt       DateTime  @default(now())

@@ -73,6 +73,9 @@ export class PosService {
           discountCents: sale.discountCents ?? 0,
           taxCents: sale.taxCents ?? 0,
           totalCents: sale.totalCents,
+          paymentMethod: sale.paymentMethod ?? "cash",
+          customerName: sale.customerName ?? null,
+          customerPhone: sale.customerPhone ?? null,
           offlineCreatedAt: new Date(sale.offlineCreatedAt),
           syncedAt: new Date(),
           items: {

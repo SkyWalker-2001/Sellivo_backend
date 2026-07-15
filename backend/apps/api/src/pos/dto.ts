@@ -78,6 +78,21 @@ export class PosSaleDto {
   @IsDateString()
   offlineCreatedAt!: string;
 
+  @ApiPropertyOptional({ example: "cash", description: "cash | upi | card" })
+  @IsOptional()
+  @IsString()
+  paymentMethod?: string;
+
+  @ApiPropertyOptional({ description: "Walk-in customer name (optional)" })
+  @IsOptional()
+  @IsString()
+  customerName?: string;
+
+  @ApiPropertyOptional({ description: "Walk-in customer phone (optional)" })
+  @IsOptional()
+  @IsString()
+  customerPhone?: string;
+
   @ApiProperty({ type: [PosSaleItemDto] })
   @IsArray()
   @ArrayNotEmpty()
