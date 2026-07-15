@@ -47,6 +47,7 @@ enum OrderStatus {
   out_for_delivery
   completed
   cancelled
+  refunded
 }
 
 enum FulfillmentType {

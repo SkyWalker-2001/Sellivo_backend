@@ -76,6 +76,7 @@ const ORDER_STATUSES: OrderStatus[] = [
   "out_for_delivery",
   "completed",
   "cancelled",
+  "refunded",
 ];
 
 export class UpdateOrderStatusDto {

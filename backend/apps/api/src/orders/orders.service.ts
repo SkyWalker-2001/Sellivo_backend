@@ -158,7 +158,31 @@ export class OrdersService {
   }
 
   async updateStatus(organizationId: string, id: string, status: OrderStatus) {
-    await this.get(organizationId, id);
-    return this.prisma.order.update({ where: { id }, data: { status } });
+    const order = await this.get(organizationId, id);
+    if (order.status !== status && !this.canTransition(order.status, status)) {
+      throw new BadRequestException(`Cannot move an order from ${order.status} to ${status}`);
+    }
+    const updated = await this.prisma.order.update({ where: { id }, data: { status } });
+    // Notify owner dashboards (and, later, the customer) of the status change.
+    this.events.emitToOrg(organizationId, "order:updated", { id: updated.id, status: updated.status });
+    return updated;
+  }
+
+  /**
+   * Allowed order lifecycle transitions. Any active order can be cancelled;
+   * a completed order can be refunded. Cancelled/refunded are terminal.
+   */
+  private canTransition(from: OrderStatus, to: OrderStatus): boolean {
+    const flow: Record<OrderStatus, OrderStatus[]> = {
+      pending: ["confirmed", "cancelled"],
+      confirmed: ["preparing", "cancelled"],
+      preparing: ["ready", "cancelled"],
+      ready: ["out_for_delivery", "completed", "cancelled"],
+      out_for_delivery: ["completed", "cancelled"],
+      completed: ["refunded"],
+      cancelled: [],
+      refunded: [],
+    };
+    return flow[from]?.includes(to) ?? false;
   }
 }
