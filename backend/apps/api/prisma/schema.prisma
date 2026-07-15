@@ -90,6 +90,8 @@ model Organization {
   customers  Customer[]
   categories Category[]
   products    Product[]
+  brands      Brand[]
+  suppliers   Supplier[]
   payments    Payment[]
   coupons     Coupon[]
   homeLayouts   HomeLayout[]
@@ -190,9 +192,12 @@ model Product {
   id             String   @id @default(uuid())
   organizationId String
   categoryId     String?
+  brandId        String?
+  supplierId     String?
   name           String
   description    String?
-  brand          String?
+  brand          String? // legacy free-text brand; superseded by brandId
+  tags           String[] @default([])
   images         Json     @default("[]")
   attributes     Json     @default("{}")
   createdAt      DateTime @default(now())
@@ -200,12 +205,50 @@ model Product {
 
   organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   category     Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brandRef     Brand?           @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  supplier     Supplier?        @relation(fields: [supplierId], references: [id], onDelete: SetNull)
   variants     ProductVariant[]
   reviews      ProductReview[]
 
   @@index([organizationId])
   @@index([categoryId])
+  @@index([brandId])
+  @@index([supplierId])
   @@map("products")
+}
+
+model Brand {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  logoUrl        String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  products     Product[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("brands")
+}
+
+model Supplier {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  contactName    String?
+  phone          String?
+  email          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  products     Product[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("suppliers")
 }
 
 // Customer product reviews. One row per customer per product (upsert on repeat).
@@ -239,6 +282,11 @@ model ProductVariant {
   // storefront renders the strike-through + discount %. Null = no discount.
   mrpCents   Int?
   costCents  Int?
+  // Catalog depth: pack weight/unit (e.g. "500" + "g"), GST rate %, and HSN code.
+  weight     String?
+  unit       String?
+  taxRatePct Int?
+  hsnCode    String?
   attributes Json     @default("{}")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt

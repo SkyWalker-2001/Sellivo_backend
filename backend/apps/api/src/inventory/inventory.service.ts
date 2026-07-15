@@ -82,6 +82,24 @@ export class InventoryService {
     });
   }
 
+  /**
+   * Ledger history for a store — the audit trail of every stock movement.
+   * Optionally filtered to a single variant. Newest first.
+   */
+  async movements(
+    organizationId: string,
+    storeId: string,
+    opts: { variantId?: string; take?: number } = {},
+  ) {
+    await this.assertStore(organizationId, storeId);
+    return this.prisma.inventoryMovement.findMany({
+      where: { storeId, ...(opts.variantId ? { variantId: opts.variantId } : {}) },
+      include: { variant: { include: { product: true } } },
+      orderBy: { createdAt: "desc" },
+      take: Math.min(opts.take ?? 100, 500),
+    });
+  }
+
   private async assertStore(organizationId: string, storeId: string) {
     const store = await this.prisma.store.findFirst({ where: { id: storeId, organizationId } });
     if (!store) throw new NotFoundException("Store not found");

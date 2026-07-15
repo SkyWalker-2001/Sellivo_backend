@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from "@nestjs/common";
+import { Body, Controller, Get, Param, Post, Query } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { InventoryService } from "./inventory.service";
 import { CreateMovementDto } from "./dto";
@@ -21,5 +21,15 @@ export class InventoryController {
   @ApiOperation({ summary: "Current on-hand per variant for a store" })
   storeInventory(@CurrentOrg() orgId: string, @Param("id") storeId: string) {
     return this.inventory.storeInventory(orgId, storeId);
+  }
+
+  @Get("stores/:id/inventory/movements")
+  @ApiOperation({ summary: "Stock movement ledger/history for a store" })
+  movements(
+    @CurrentOrg() orgId: string,
+    @Param("id") storeId: string,
+    @Query("variantId") variantId?: string,
+  ) {
+    return this.inventory.movements(orgId, storeId, { variantId });
   }
 }

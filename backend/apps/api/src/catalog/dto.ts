@@ -44,6 +44,22 @@ export class CreateProductDto {
   @IsString()
   categoryId?: string;
 
+  @ApiPropertyOptional({ description: "Brand id (first-class brand reference)" })
+  @IsOptional()
+  @IsString()
+  brandId?: string;
+
+  @ApiPropertyOptional({ description: "Supplier id" })
+  @IsOptional()
+  @IsString()
+  supplierId?: string;
+
+  @ApiPropertyOptional({ type: [String], description: "Free-form tags" })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+
   @ApiPropertyOptional({ type: [String], description: "Image URLs" })
   @IsOptional()
   @IsArray()
@@ -73,11 +89,38 @@ export class CreateVariantDto {
   @Min(0)
   priceCents!: number;
 
+  @ApiPropertyOptional({ example: 5000, description: "MRP / list price in minor units (paise)" })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  mrpCents?: number;
+
   @ApiPropertyOptional({ example: 2500, description: "Cost in minor units (paise)" })
   @IsOptional()
   @IsInt()
   @Min(0)
   costCents?: number;
+
+  @ApiPropertyOptional({ example: "500", description: "Pack weight/size value" })
+  @IsOptional()
+  @IsString()
+  weight?: string;
+
+  @ApiPropertyOptional({ example: "g", description: "Unit (g, kg, ml, l, pcs)" })
+  @IsOptional()
+  @IsString()
+  unit?: string;
+
+  @ApiPropertyOptional({ example: 5, description: "GST rate percent" })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  taxRatePct?: number;
+
+  @ApiPropertyOptional({ example: "22021010", description: "HSN/SAC code" })
+  @IsOptional()
+  @IsString()
+  hsnCode?: string;
 
   @ApiPropertyOptional({ example: { size: "500ml", color: "red" } })
   @IsOptional()
@@ -86,6 +129,40 @@ export class CreateVariantDto {
 }
 
 export class UpdateVariantDto extends PartialType(CreateVariantDto) {}
+
+export class UpsertBrandDto {
+  @ApiProperty({ example: "Acme Drinks" })
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+
+  @ApiPropertyOptional({ example: "/uploads/brands/acme.png" })
+  @IsOptional()
+  @IsString()
+  logoUrl?: string;
+}
+
+export class UpsertSupplierDto {
+  @ApiProperty({ example: "Metro Wholesale" })
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  contactName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  phone?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  email?: string;
+}
 
 export class ImportProductRowDto {
   @ApiProperty()
