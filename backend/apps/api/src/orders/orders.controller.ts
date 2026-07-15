@@ -28,7 +28,7 @@ export class OrdersController {
   }
 
   @Patch(":id/status")
-  @Roles("owner", "manager")
+  @Roles("owner", "manager", "cashier")
   @ApiOperation({ summary: "Update order fulfillment status" })
   updateStatus(
     @CurrentOrg() orgId: string,
