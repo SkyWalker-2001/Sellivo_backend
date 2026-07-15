@@ -9,6 +9,7 @@ class SendNotificationDto {
   @IsString() @IsNotEmpty() body!: string;
   @IsOptional() @IsIn(["all", "customers"]) audience?: string;
   @IsOptional() @IsString() storeId?: string;
+  @IsOptional() @IsString() scheduledAt?: string; // ISO; future = queued
 }
 
 @ApiTags("notifications")
