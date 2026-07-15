@@ -1,0 +1,570 @@
+// Sellivo — core data model (PLAN.md §3).
+// Multi-tenancy: shared DB, every row scoped by organizationId (enforced at the query layer).
+// Money is stored as integer minor units (paise/cents) to avoid float drift.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  owner
+  manager
+  cashier
+}
+
+// Ledger movement reasons (PLAN.md §3 inventory_movements).
+enum MovementReason {
+  sale_online
+  sale_pos
+  restock
+  adjustment
+  return
+  reconciliation
+}
+
+// Which surface produced a movement.
+enum MovementSource {
+  pos
+  web
+  owner_app
+  system
+}
+
+enum OrderStatus {
+  pending
+  confirmed
+  preparing
+  ready
+  out_for_delivery
+  completed
+  cancelled
+}
+
+enum FulfillmentType {
+  delivery
+  pickup
+}
+
+// A payment is polymorphic to exactly one of order / pos_sale.
+enum PaymentTarget {
+  order
+  pos_sale
+}
+
+enum PaymentMethod {
+  cash
+  card
+  upi
+  online
+}
+
+enum PaymentStatus {
+  pending
+  paid
+  failed
+  refunded
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Identity & tenancy
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  stores     Store[]
+  users      User[]
+  customers  Customer[]
+  categories Category[]
+  products    Product[]
+  payments    Payment[]
+  coupons     Coupon[]
+  homeLayouts   HomeLayout[]
+  banners       Banner[]
+  notifications Notification[]
+
+  @@map("organizations")
+}
+
+model Store {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  address        String?
+  // branding / config JSON: logo, colors, hours, delivery settings (PLAN.md §6 store customization).
+  config         Json     @default("{}")
+  timezone       String   @default("Asia/Kolkata")
+  currency       String   @default("INR")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users        User[]
+  inventory    Inventory[]
+  movements    InventoryMovement[]
+  orders       Order[]
+  posSales     PosSale[]
+  syncBatches  SyncBatch[]
+
+  @@index([organizationId])
+  @@map("stores")
+}
+
+model User {
+  id             String   @id @default(uuid())
+  organizationId String
+  // manager/cashier are scoped to one store; owner is org-wide (storeId null).
+  storeId        String?
+  email          String   @unique
+  passwordHash   String
+  name           String
+  role           Role
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  store        Store?       @relation(fields: [storeId], references: [id], onDelete: SetNull)
+  posSales     PosSale[]
+
+  @@index([organizationId])
+  @@index([storeId])
+  @@map("users")
+}
+
+model Customer {
+  id             String   @id @default(uuid())
+  organizationId String
+  email          String?
+  phone          String?
+  passwordHash   String?
+  name           String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  orders       Order[]
+  reviews      ProductReview[]
+  addresses    CustomerAddress[]
+
+  @@unique([organizationId, email])
+  @@unique([organizationId, phone])
+  @@index([organizationId])
+  @@map("customers")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Catalog (org-level, shared across that org's stores)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Category {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  parentId       String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  parent       Category?    @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children     Category[]   @relation("CategoryTree")
+  products     Product[]
+
+  @@index([organizationId])
+  @@map("categories")
+}
+
+model Product {
+  id             String   @id @default(uuid())
+  organizationId String
+  categoryId     String?
+  name           String
+  description    String?
+  brand          String?
+  images         Json     @default("[]")
+  attributes     Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category     Category?        @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  variants     ProductVariant[]
+  reviews      ProductReview[]
+
+  @@index([organizationId])
+  @@index([categoryId])
+  @@map("products")
+}
+
+// Customer product reviews. One row per customer per product (upsert on repeat).
+model ProductReview {
+  id             String   @id @default(uuid())
+  organizationId String
+  productId      String
+  customerId     String
+  rating         Int // 1..5
+  title          String?
+  body           String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, customerId])
+  @@index([productId])
+  @@map("product_reviews")
+}
+
+// Billing & scanning happen at the variant level (PLAN.md §3).
+model ProductVariant {
+  id         String   @id @default(uuid())
+  productId  String
+  sku        String   @unique
+  barcode    String?  @unique
+  priceCents Int
+  // Optional list price / MRP. When set and greater than priceCents the
+  // storefront renders the strike-through + discount %. Null = no discount.
+  mrpCents   Int?
+  costCents  Int?
+  attributes Json     @default("{}")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  product        Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  inventory      Inventory[]
+  movements      InventoryMovement[]
+  orderItems     OrderItem[]
+  posSaleItems   PosSaleItem[]
+
+  @@index([productId])
+  @@index([barcode])
+  @@map("product_variants")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inventory (per store, ledger-based — the important part, PLAN.md §4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Cached on-hand total per (store, variant). Derived from movements; kept for fast reads.
+model Inventory {
+  id        String   @id @default(uuid())
+  storeId   String
+  variantId String
+  onHand    Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  store   Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([storeId, variantId])
+  @@index([storeId])
+  @@map("inventory")
+}
+
+// Append-only ledger. Current stock = SUM(delta) over (store, variant).
+// `id` is a client-supplied UUID so an offline POS can generate it and replay
+// idempotently — re-pushing the same movement is a no-op on the unique PK.
+model InventoryMovement {
+  id        String         @id
+  storeId   String
+  variantId String
+  delta     Int
+  reason    MovementReason
+  source    MovementSource
+  // points at the pos_sale / order / adjustment that produced this movement.
+  refId     String?
+  createdAt DateTime       @default(now())
+
+  store   Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([storeId, variantId])
+  @@index([storeId, createdAt])
+  @@map("inventory_movements")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sales & orders
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Order {
+  id              String          @id @default(uuid())
+  organizationId  String
+  storeId         String
+  customerId      String?
+  status          OrderStatus     @default(pending)
+  fulfillmentType FulfillmentType
+  subtotalCents   Int
+  discountCents   Int             @default(0)
+  taxCents        Int             @default(0)
+  deliveryFeeCents Int            @default(0)
+  totalCents      Int
+  couponCode      String?
+  deliveryAddress String?
+  deliverySlot    String?
+  notes           String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  store    Store       @relation(fields: [storeId], references: [id])
+  customer Customer?   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  items    OrderItem[]
+  payments Payment[]
+
+  @@index([organizationId])
+  @@index([storeId])
+  @@index([customerId])
+  @@map("orders")
+}
+
+// Promo codes. Percentage or flat discount, with an optional minimum spend.
+enum CouponType {
+  percent
+  flat
+}
+
+model Coupon {
+  id               String     @id @default(uuid())
+  organizationId   String
+  code             String
+  type             CouponType
+  value            Int // percent (1..100) or flat minor units
+  minSubtotalCents Int        @default(0)
+  active           Boolean    @default(true)
+  createdAt        DateTime   @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+  @@map("coupons")
+}
+
+model CustomerAddress {
+  id             String   @id @default(uuid())
+  organizationId String
+  customerId     String
+  label          String // Home, Work, …
+  name           String
+  phone          String
+  line1          String
+  line2          String?
+  city           String
+  pincode        String
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@map("customer_addresses")
+}
+
+model OrderItem {
+  id             String @id @default(uuid())
+  orderId        String
+  variantId      String
+  quantity       Int
+  unitPriceCents Int
+  totalCents     Int
+
+  order   Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@index([orderId])
+  @@map("order_items")
+}
+
+// In-store transaction. `clientUuid` is the idempotency key for offline sync push:
+// the server dedupes on it so replaying a batch is a no-op (PLAN.md §4).
+model PosSale {
+  id              String    @id @default(uuid())
+  storeId         String
+  cashierId       String
+  clientUuid      String    @unique
+  subtotalCents   Int
+  discountCents   Int       @default(0)
+  taxCents        Int       @default(0)
+  totalCents      Int
+  offlineCreatedAt DateTime
+  syncedAt        DateTime?
+  createdAt       DateTime  @default(now())
+
+  store    Store         @relation(fields: [storeId], references: [id])
+  cashier  User          @relation(fields: [cashierId], references: [id])
+  items    PosSaleItem[]
+  payments Payment[]
+
+  @@index([storeId])
+  @@index([cashierId])
+  @@map("pos_sales")
+}
+
+model PosSaleItem {
+  id             String @id @default(uuid())
+  posSaleId      String
+  variantId      String
+  quantity       Int
+  unitPriceCents Int
+  totalCents     Int
+
+  posSale PosSale        @relation(fields: [posSaleId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@index([posSaleId])
+  @@map("pos_sale_items")
+}
+
+// Polymorphic to exactly one of order / pos_sale. Webhook is the source of truth
+// for marking paid (PLAN.md §8) — never trust the client.
+model Payment {
+  id             String        @id @default(uuid())
+  organizationId String
+  target         PaymentTarget
+  orderId        String?
+  posSaleId      String?
+  gateway        String        @default("razorpay")
+  gatewayRef     String?
+  method         PaymentMethod
+  status         PaymentStatus @default(pending)
+  amountCents    Int
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  order        Order?       @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  posSale      PosSale?     @relation(fields: [posSaleId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([orderId])
+  @@index([posSaleId])
+  @@index([gatewayRef])
+  @@map("payments")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sync
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Record of what each POS device pushed/pulled (PLAN.md §3).
+model SyncBatch {
+  id          String   @id @default(uuid())
+  storeId     String
+  deviceId    String
+  direction   String // "push" | "pull"
+  cursor      String?
+  itemCount   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  store Store @relation(fields: [storeId], references: [id], onDelete: Cascade)
+
+  @@index([storeId])
+  @@index([deviceId])
+  @@map("sync_batches")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-Driven UI (CMS) — the owner designs the customer app's home layout.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// One home layout per (org, store, channel). `status` separates the editable
+// draft from what customers actually see (published). storeId null = org default
+// used by any store without its own layout.
+model HomeLayout {
+  id             String       @id @default(uuid())
+  organizationId String
+  storeId        String?
+  status         LayoutStatus @default(draft)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sections     LayoutSection[]
+
+  @@unique([organizationId, storeId, status])
+  @@index([organizationId])
+  @@map("home_layouts")
+}
+
+enum LayoutStatus {
+  draft
+  published
+}
+
+// Store-wide notifications the owner sends; the customer app shows them in its
+// notification centre. (In-app delivery; FCM push is a future add-on.)
+model Notification {
+  id             String   @id @default(uuid())
+  organizationId String
+  storeId        String?
+  title          String
+  body           String
+  audience       String   @default("all") // all | customers | ...
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("notifications")
+}
+
+// Promo banners shown by the customer app (hero/ad sections). Each carries an
+// optional tap action, a schedule, priority ordering, and click/impression counters.
+model Banner {
+  id             String    @id @default(uuid())
+  organizationId String
+  storeId        String?
+  imageUrl       String
+  title          String?
+  subtitle       String?
+  actionType     String    @default("none") // none | category | product | offer | url | page
+  actionValue    String?
+  priority       Int       @default(0)
+  active         Boolean   @default(true)
+  startAt        DateTime?
+  endAt          DateTime?
+  clicks         Int       @default(0)
+  impressions    Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("banners")
+}
+
+// One configurable section within a layout. `type` selects the renderer widget;
+// `config` holds presentation (title, colors, padding, radius, animation…) and
+// `dataSource` holds what feeds it (kind, categoryId, sort, discountOnly, limit).
+model LayoutSection {
+  id         String   @id @default(uuid())
+  layoutId   String
+  type       String // hero_banner | category_grid | flash_sale | best_seller | …
+  position   Int // ordering within the layout
+  enabled    Boolean  @default(true)
+  config     Json     @default("{}")
+  dataSource Json     @default("{}")
+  startAt    DateTime?
+  endAt      DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  layout HomeLayout @relation(fields: [layoutId], references: [id], onDelete: Cascade)
+
+  @@index([layoutId, position])
+  @@map("layout_sections")
+}

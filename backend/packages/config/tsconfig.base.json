@@ -1,0 +1,4 @@
+{
+  "$comment": "Shared TS preset for Sellivo packages. Extend from ../../tsconfig.base.json at the repo root; this file re-exports it so packages can reference @sellivo/config.",
+  "extends": "../../tsconfig.base.json"
+}
