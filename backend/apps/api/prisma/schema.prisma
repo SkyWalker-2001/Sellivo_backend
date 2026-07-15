@@ -97,8 +97,25 @@ model Organization {
   homeLayouts   HomeLayout[]
   banners       Banner[]
   notifications Notification[]
+  apiKeys       ApiKey[]
 
   @@map("organizations")
+}
+
+model ApiKey {
+  id             String    @id @default(uuid())
+  organizationId String
+  name           String
+  prefix         String // shown in the UI (e.g. sk_live_ab12…)
+  keyHash        String    @unique // sha256 of the full key; the key itself is shown once
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("api_keys")
 }
 
 model Store {

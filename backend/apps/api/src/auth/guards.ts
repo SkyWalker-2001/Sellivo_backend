@@ -9,21 +9,43 @@ import { AuthGuard } from "@nestjs/passport";
 import type { Role } from "@prisma/client";
 import { IS_PUBLIC_KEY, ROLES_KEY } from "../common/decorators";
 import type { AuthUser } from "../common/auth-user";
+import { ApiKeysService } from "../admin/api-keys.service";
 
-/** Global guard: every route requires a valid access token unless marked @Public. */
+/**
+ * Global guard: every route requires a valid access token unless marked @Public.
+ * Also accepts an `x-api-key` header for programmatic (owner-scoped) access.
+ */
 @Injectable()
 export class JwtAuthGuard extends AuthGuard("jwt") {
-  constructor(private readonly reflector: Reflector) {
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly apiKeys: ApiKeysService,
+  ) {
     super();
   }
 
-  canActivate(context: ExecutionContext) {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
     if (isPublic) return true;
-    return super.canActivate(context);
+
+    // Programmatic access via API key → owner-scoped principal.
+    const req = context
+      .switchToHttp()
+      .getRequest<{ headers: Record<string, unknown>; user?: AuthUser }>();
+    const header = req.headers["x-api-key"];
+    const apiKey = Array.isArray(header) ? header[0] : header;
+    if (typeof apiKey === "string" && apiKey) {
+      const principal = await this.apiKeys.resolve(apiKey);
+      if (principal) {
+        req.user = principal;
+        return true;
+      }
+    }
+
+    return super.canActivate(context) as Promise<boolean>;
   }
 }
 

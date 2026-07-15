@@ -21,6 +21,7 @@ import { BannersModule } from "./banners/banners.module";
 import { CustomersModule } from "./customers/customers.module";
 import { NotificationsModule } from "./notifications/notifications.module";
 import { EventsModule } from "./events/events.module";
+import { AdminModule } from "./admin/admin.module";
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { EventsModule } from "./events/events.module";
     CustomersModule,
     NotificationsModule,
     EventsModule,
+    AdminModule,
   ],
   providers: [
     // Auth is enforced globally; opt out per-route with @Public().
