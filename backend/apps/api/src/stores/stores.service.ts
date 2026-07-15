@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import type { CreateStoreDto, UpdateStoreDto } from "./dto";
+import { normalizeConfig } from "./appearance";
 
 @Injectable()
 export class StoresService {
@@ -34,9 +35,12 @@ export class StoresService {
 
   async updateConfig(organizationId: string, id: string, config: Record<string, unknown>) {
     await this.get(organizationId, id);
+    // Sanitize the appearance block (colors, radius, flags) on write so the
+    // customer app always reads a complete, valid theme. Unknown keys pass through.
+    const clean = normalizeConfig(config);
     return this.prisma.store.update({
       where: { id },
-      data: { config: config as Prisma.InputJsonValue },
+      data: { config: clean as Prisma.InputJsonValue },
     });
   }
 }
