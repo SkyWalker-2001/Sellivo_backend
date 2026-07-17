@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from "@nestjs/swagger";
 import {
   IsArray,
+  IsBoolean,
+  IsDateString,
   IsInt,
   IsNotEmpty,
   IsObject,
@@ -19,9 +21,42 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsString()
   parentId?: string;
+
+  @ApiPropertyOptional({ description: "Category image URL" })
+  @IsOptional()
+  @IsString()
+  image?: string;
+
+  @ApiPropertyOptional({ example: "#7C5CFF", description: "Accent color hex" })
+  @IsOptional()
+  @IsString()
+  color?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @ApiPropertyOptional({ example: 1, description: "Sort order (ascending)" })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  displayOrder?: number;
+
+  @ApiPropertyOptional({ description: "Hidden categories are excluded from the storefront" })
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
 }
 
 export class UpdateCategoryDto extends PartialType(CreateCategoryDto) {}
+
+export class ReorderCategoriesDto {
+  @ApiProperty({ type: [String], description: "Category ids in the desired order" })
+  @IsArray()
+  @IsString({ each: true })
+  ids!: string[];
+}
 
 export class CreateProductDto {
   @ApiProperty({ example: "Cola 500ml" })
@@ -122,6 +157,11 @@ export class CreateVariantDto {
   @IsString()
   hsnCode?: string;
 
+  @ApiPropertyOptional({ example: "2026-12-31", description: "Shelf-life expiry date (ISO)" })
+  @IsOptional()
+  @IsDateString()
+  expiryDate?: string;
+
   @ApiPropertyOptional({ example: { size: "500ml", color: "red" } })
   @IsOptional()
   @IsObject()
@@ -129,6 +169,44 @@ export class CreateVariantDto {
 }
 
 export class UpdateVariantDto extends PartialType(CreateVariantDto) {}
+
+export class UpdatePricesDto {
+  @ApiPropertyOptional({ description: "Selling price (paise)" })
+  @IsOptional() @IsInt() @Min(0)
+  sellingCents?: number;
+
+  @ApiPropertyOptional({ description: "MRP / list price (paise)" })
+  @IsOptional() @IsInt() @Min(0)
+  mrpCents?: number;
+
+  @ApiPropertyOptional({ description: "Purchase cost (paise)" })
+  @IsOptional() @IsInt() @Min(0)
+  costCents?: number;
+
+  @ApiPropertyOptional({ description: "Wholesale price (paise)" })
+  @IsOptional() @IsInt() @Min(0)
+  wholesaleCents?: number;
+
+  @ApiPropertyOptional({ description: "Member price (paise)" })
+  @IsOptional() @IsInt() @Min(0)
+  memberCents?: number;
+
+  @ApiPropertyOptional({ description: "Delivery price (paise)" })
+  @IsOptional() @IsInt() @Min(0)
+  deliveryCents?: number;
+
+  @ApiPropertyOptional({ description: "Offer price (paise)" })
+  @IsOptional() @IsInt() @Min(0)
+  offerCents?: number;
+
+  @ApiPropertyOptional({ description: '"all" (org-wide) or a storeId', example: "all" })
+  @IsOptional() @IsString()
+  scope?: string;
+
+  @ApiPropertyOptional({ description: "Optional reason recorded in history" })
+  @IsOptional() @IsString()
+  note?: string;
+}
 
 export class UpsertBrandDto {
   @ApiProperty({ example: "Acme Drinks" })

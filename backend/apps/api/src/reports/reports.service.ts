@@ -224,4 +224,136 @@ export class ReportsService {
       onHand: r.onHand,
     }));
   }
+
+  /**
+   * In-stock items whose SKU expiry falls on/before now + `days` (includes
+   * already-expired). Powers the dashboard expiry bell. Scoped to a store when
+   * given, else across all of the org's stores.
+   */
+  async expiringItems(organizationId: string, days: number, storeId?: string) {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() + days);
+    const rows = await this.prisma.inventory.findMany({
+      where: {
+        store: { organizationId },
+        ...(storeId ? { storeId } : {}),
+        onHand: { gt: 0 },
+        variant: { expiryDate: { not: null, lte: cutoff } },
+      },
+      include: {
+        store: { select: { id: true, name: true } },
+        variant: { include: { product: { select: { id: true, name: true } } } },
+      },
+      orderBy: { variant: { expiryDate: "asc" } },
+    });
+    return rows.map((r) => ({
+      storeId: r.storeId,
+      storeName: r.store.name,
+      variantId: r.variantId,
+      sku: r.variant.sku,
+      productName: r.variant.product.name,
+      onHand: r.onHand,
+      expiryDate: r.variant.expiryDate,
+    }));
+  }
+
+  /**
+   * One-shot aggregate for the Inventory Dashboard. Counts/value are derived
+   * from inventory rows (scoped to `storeId` when given, else all stores),
+   * mirroring how low-stock is computed. `series` reconstructs total on-hand
+   * over the last 7 days from the movement ledger. PO/transfer counts are 0
+   * until those modules exist.
+   */
+  async inventorySummary(organizationId: string, threshold: number, storeId?: string) {
+    const expiryWindowDays = 30;
+    const [totalProducts, totalCategories, rows, lastMovement] = await Promise.all([
+      this.prisma.product.count({ where: { organizationId } }),
+      this.prisma.category.count({ where: { organizationId } }),
+      this.prisma.inventory.findMany({
+        where: { store: { organizationId }, ...(storeId ? { storeId } : {}) },
+        include: {
+          variant: {
+            select: { id: true, priceCents: true, costCents: true, expiryDate: true },
+          },
+        },
+      }),
+      this.prisma.inventoryMovement.findFirst({
+        where: { store: { organizationId }, ...(storeId ? { storeId } : {}) },
+        orderBy: { createdAt: "desc" },
+        select: { createdAt: true },
+      }),
+    ]);
+
+    // Aggregate on-hand per variant (a variant may have rows in several stores).
+    const perVariant = new Map<
+      string,
+      { onHand: number; priceCents: number; costCents: number | null; expiryDate: Date | null }
+    >();
+    for (const r of rows) {
+      const cur = perVariant.get(r.variantId) ?? {
+        onHand: 0,
+        priceCents: r.variant.priceCents,
+        costCents: r.variant.costCents,
+        expiryDate: r.variant.expiryDate,
+      };
+      cur.onHand += r.onHand;
+      perVariant.set(r.variantId, cur);
+    }
+
+    const now = new Date();
+    const expiryCutoff = new Date(now);
+    expiryCutoff.setDate(expiryCutoff.getDate() + expiryWindowDays);
+
+    let totalStockUnits = 0;
+    let inventoryValueCents = 0;
+    let inStockCount = 0;
+    let lowStockCount = 0;
+    let outOfStockCount = 0;
+    let expiringSoonCount = 0;
+    for (const v of perVariant.values()) {
+      totalStockUnits += v.onHand;
+      inventoryValueCents += v.onHand * (v.costCents ?? v.priceCents ?? 0);
+      if (v.onHand <= 0) outOfStockCount++;
+      else if (v.onHand <= threshold) lowStockCount++;
+      else inStockCount++;
+      if (v.onHand > 0 && v.expiryDate && v.expiryDate <= expiryCutoff) expiringSoonCount++;
+    }
+
+    // Reconstruct end-of-day total on-hand for the last 7 days: current total
+    // minus the deltas that landed after each day's end.
+    const weekAgo = new Date(now);
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const recent = await this.prisma.inventoryMovement.findMany({
+      where: {
+        store: { organizationId },
+        ...(storeId ? { storeId } : {}),
+        createdAt: { gte: weekAgo },
+      },
+      select: { delta: true, createdAt: true },
+    });
+    const series: { date: string; units: number }[] = [];
+    for (let i = 6; i >= 0; i--) {
+      const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const endOfDay = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 23, 59, 59, 999);
+      const deltaAfter = recent
+        .filter((m) => m.createdAt > endOfDay)
+        .reduce((s, m) => s + m.delta, 0);
+      series.push({ date: day.toISOString(), units: totalStockUnits - deltaAfter });
+    }
+
+    return {
+      totalProducts,
+      totalCategories,
+      totalStockUnits,
+      inventoryValueCents,
+      inStockCount,
+      lowStockCount,
+      outOfStockCount,
+      expiringSoonCount,
+      pendingPurchaseOrders: 0,
+      stockTransfers: 0,
+      lastSyncAt: lastMovement?.createdAt ?? null,
+      series,
+    };
+  }
 }

@@ -19,6 +19,7 @@ enum Role {
   owner
   manager
   cashier
+  delivery
 }
 
 // Ledger movement reasons (PLAN.md §3 inventory_movements).
@@ -43,10 +44,14 @@ enum OrderStatus {
   pending
   confirmed
   preparing
+  packed
   ready
   out_for_delivery
+  delivered
   completed
   cancelled
+  refund_requested
+  refund_approved
   refunded
 }
 
@@ -157,6 +162,7 @@ model User {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   store        Store?       @relation(fields: [storeId], references: [id], onDelete: SetNull)
   posSales     PosSale[]
+  assignedOrders Order[]    @relation("OrderAssignee")
 
   @@index([organizationId])
   @@index([storeId])
@@ -193,6 +199,11 @@ model Category {
   organizationId String
   name           String
   parentId       String?
+  image          String?
+  color          String?
+  description    String?
+  displayOrder   Int      @default(0)
+  isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -304,6 +315,14 @@ model ProductVariant {
   unit       String?
   taxRatePct Int?
   hsnCode    String?
+  // Optional shelf-life expiry for this SKU. Drives the dashboard expiry alert.
+  expiryDate DateTime?
+  // Extra price tiers (base/all-branch). priceCents = selling, mrpCents = MRP,
+  // costCents = purchase cost. These add wholesale/member/delivery/offer.
+  wholesaleCents Int?
+  memberCents    Int?
+  deliveryCents  Int?
+  offerCents     Int?
   attributes Json     @default("{}")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
@@ -311,6 +330,7 @@ model ProductVariant {
   product        Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
   inventory      Inventory[]
   movements      InventoryMovement[]
+  priceHistory   PriceHistory[]
   orderItems     OrderItem[]
   posSaleItems   PosSaleItem[]
 
@@ -324,6 +344,23 @@ model ProductVariant {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Cached on-hand total per (store, variant). Derived from movements; kept for fast reads.
+// Immutable audit log of price-tier changes. One row per changed tier.
+model PriceHistory {
+  id        String   @id @default(uuid())
+  variantId String
+  field     String // selling | mrp | cost | wholesale | member | delivery | offer
+  oldCents  Int?
+  newCents  Int?
+  scope     String   @default("all") // "all" (org-wide) or a storeId
+  note      String?
+  createdAt DateTime @default(now())
+
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([variantId, createdAt])
+  @@map("price_history")
+}
+
 model Inventory {
   id        String   @id @default(uuid())
   storeId   String
@@ -381,18 +418,37 @@ model Order {
   deliveryAddress String?
   deliverySlot    String?
   notes           String?
+  // Delivery assignment + proof-of-delivery OTP (generated at out_for_delivery).
+  assignedToId    String?
+  deliveryOtp     String?
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
-  store    Store       @relation(fields: [storeId], references: [id])
-  customer Customer?   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  store      Store     @relation(fields: [storeId], references: [id])
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  assignedTo User?     @relation("OrderAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
   items    OrderItem[]
   payments Payment[]
+  statusHistory OrderStatusHistory[]
 
   @@index([organizationId])
   @@index([storeId])
   @@index([customerId])
   @@map("orders")
+}
+
+// Immutable audit of order status transitions. One row per change.
+model OrderStatusHistory {
+  id        String      @id @default(uuid())
+  orderId   String
+  status    OrderStatus
+  note      String?
+  createdAt DateTime    @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+  @@map("order_status_history")
 }
 
 // Promo codes. Percentage or flat discount, with an optional minimum spend.

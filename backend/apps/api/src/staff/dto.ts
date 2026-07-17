@@ -23,9 +23,9 @@ export class CreateStaffDto {
   @MinLength(8)
   password!: string;
 
-  @ApiProperty({ enum: ["manager", "cashier"], example: "manager" })
-  @IsIn(["manager", "cashier"])
-  role!: "manager" | "cashier";
+  @ApiProperty({ enum: ["manager", "cashier", "delivery"], example: "manager" })
+  @IsIn(["manager", "cashier", "delivery"])
+  role!: "manager" | "cashier" | "delivery";
 
   @ApiPropertyOptional({ description: "Store the manager/cashier is scoped to" })
   @IsOptional()

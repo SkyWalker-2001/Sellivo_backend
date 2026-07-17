@@ -1,31 +1,62 @@
 import { ConflictException, Injectable, NotFoundException } from "@nestjs/common";
 import type { Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { EventsGateway } from "../events/events.gateway";
 import type {
   CreateCategoryDto,
   CreateProductDto,
   CreateVariantDto,
   UpdateCategoryDto,
+  UpdatePricesDto,
   UpdateProductDto,
   UpdateVariantDto,
 } from "./dto";
 
 @Injectable()
 export class CatalogService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: EventsGateway,
+  ) {}
 
   // ── Categories ─────────────────────────────────────────────────────────────
   createCategory(organizationId: string, dto: CreateCategoryDto) {
     return this.prisma.category.create({ data: { organizationId, ...dto } });
   }
 
-  listCategories(organizationId: string) {
-    return this.prisma.category.findMany({ where: { organizationId }, orderBy: { name: "asc" } });
+  /** List categories with product counts, ordered for the category-first UI. */
+  async listCategories(organizationId: string) {
+    const rows = await this.prisma.category.findMany({
+      where: { organizationId },
+      orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
+      include: { _count: { select: { products: true } } },
+    });
+    return rows.map(({ _count, ...c }) => ({ ...c, productCount: _count.products }));
   }
 
   async updateCategory(organizationId: string, id: string, dto: UpdateCategoryDto) {
     await this.assertCategory(organizationId, id);
     return this.prisma.category.update({ where: { id }, data: dto });
+  }
+
+  /** Delete a category. Its products are orphaned (categoryId → null) via the schema. */
+  async deleteCategory(organizationId: string, id: string) {
+    await this.assertCategory(organizationId, id);
+    await this.prisma.category.delete({ where: { id } });
+    return { deleted: true };
+  }
+
+  /** Persist a new category ordering; index in the list becomes displayOrder. */
+  async reorderCategories(organizationId: string, ids: string[]) {
+    await this.prisma.$transaction(
+      ids.map((id, i) =>
+        this.prisma.category.updateMany({
+          where: { id, organizationId },
+          data: { displayOrder: i },
+        }),
+      ),
+    );
+    return this.listCategories(organizationId);
   }
 
   // ── Products ────────────────────────────────────────────────────────────────
@@ -41,12 +72,60 @@ export class CatalogService {
     });
   }
 
-  listProducts(organizationId: string) {
-    return this.prisma.product.findMany({
-      where: { organizationId },
+  /**
+   * List products with variants. Supports the category-first UI: filter by
+   * category (`categoryId`, or `"none"` for uncategorized), free-text search,
+   * and skip/take pagination. Each variant is annotated with `stock` (on-hand
+   * summed across the org's stores) so cards can show stock without a second call.
+   */
+  async listProducts(
+    organizationId: string,
+    opts: { categoryId?: string; q?: string; skip?: number; take?: number; storeId?: string } = {},
+  ) {
+    const { categoryId, q } = opts;
+    const skip = opts.skip && opts.skip > 0 ? opts.skip : undefined;
+    const take = opts.take && opts.take > 0 ? Math.min(opts.take, 200) : undefined;
+
+    const where: Prisma.ProductWhereInput = { organizationId };
+    if (categoryId === "none") where.categoryId = null;
+    else if (categoryId) where.categoryId = categoryId;
+    if (q?.trim()) {
+      const term = q.trim();
+      where.OR = [
+        { name: { contains: term, mode: "insensitive" } },
+        { brand: { contains: term, mode: "insensitive" } },
+        { variants: { some: { sku: { contains: term, mode: "insensitive" } } } },
+        { variants: { some: { barcode: { contains: term, mode: "insensitive" } } } },
+      ];
+    }
+
+    const products = await this.prisma.product.findMany({
+      where,
       include: { variants: true },
       orderBy: { createdAt: "desc" },
+      skip,
+      take,
     });
+
+    // Aggregate on-hand stock per variant. Scoped to `storeId` when given,
+    // otherwise summed across all of the org's stores.
+    const variantIds = products.flatMap((p) => p.variants.map((v) => v.id));
+    const stockByVariant = new Map<string, number>();
+    if (variantIds.length) {
+      const grouped = await this.prisma.inventory.groupBy({
+        by: ["variantId"],
+        where: {
+          variantId: { in: variantIds },
+          ...(opts.storeId ? { storeId: opts.storeId } : {}),
+        },
+        _sum: { onHand: true },
+      });
+      for (const g of grouped) stockByVariant.set(g.variantId, g._sum.onHand ?? 0);
+    }
+    return products.map((p) => ({
+      ...p,
+      variants: p.variants.map((v) => ({ ...v, stock: stockByVariant.get(v.id) ?? 0 })),
+    }));
   }
 
   async getProduct(organizationId: string, id: string) {
@@ -74,11 +153,12 @@ export class CatalogService {
   // ── Variants ─────────────────────────────────────────────────────────────────
   async createVariant(organizationId: string, productId: string, dto: CreateVariantDto) {
     await this.getProduct(organizationId, productId);
-    const { attributes, ...rest } = dto;
+    const { attributes, expiryDate, ...rest } = dto;
     return this.prisma.productVariant.create({
       data: {
         productId,
         ...rest,
+        ...(expiryDate ? { expiryDate: new Date(expiryDate) } : {}),
         attributes: (attributes ?? {}) as Prisma.InputJsonValue,
       },
     });
@@ -86,13 +166,83 @@ export class CatalogService {
 
   async updateVariant(organizationId: string, id: string, dto: UpdateVariantDto) {
     await this.assertVariant(organizationId, id);
-    const { attributes, ...rest } = dto;
+    const { attributes, expiryDate, ...rest } = dto;
     return this.prisma.productVariant.update({
       where: { id },
       data: {
         ...rest,
+        // `null` clears the date; `undefined` leaves it untouched.
+        ...(expiryDate !== undefined
+          ? { expiryDate: expiryDate ? new Date(expiryDate) : null }
+          : {}),
         ...(attributes !== undefined ? { attributes: attributes as Prisma.InputJsonValue } : {}),
       },
+    });
+  }
+
+  // ── Price management ─────────────────────────────────────────────────────────
+  /**
+   * Update any subset of a variant's price tiers, log each change to the
+   * immutable PriceHistory, and broadcast `price:updated` so POS / customer /
+   * storefront clients can refresh. Prices are org-wide (base) for now; `scope`
+   * is recorded for audit and future per-branch overrides.
+   */
+  async updatePrices(organizationId: string, variantId: string, dto: UpdatePricesDto) {
+    const variant = await this.prisma.productVariant.findFirst({
+      where: { id: variantId, product: { organizationId } },
+    });
+    if (!variant) throw new NotFoundException("Variant not found");
+
+    // Map each incoming tier to its column + current value.
+    const tiers: { field: string; column: keyof typeof variant; next?: number }[] = [
+      { field: "selling", column: "priceCents", next: dto.sellingCents },
+      { field: "mrp", column: "mrpCents", next: dto.mrpCents },
+      { field: "cost", column: "costCents", next: dto.costCents },
+      { field: "wholesale", column: "wholesaleCents", next: dto.wholesaleCents },
+      { field: "member", column: "memberCents", next: dto.memberCents },
+      { field: "delivery", column: "deliveryCents", next: dto.deliveryCents },
+      { field: "offer", column: "offerCents", next: dto.offerCents },
+    ];
+    const scope = dto.scope?.trim() || "all";
+    const data: Record<string, number> = {};
+    const historyRows: Prisma.PriceHistoryCreateManyInput[] = [];
+    for (const t of tiers) {
+      if (t.next === undefined) continue;
+      const old = variant[t.column] as number | null;
+      if (old === t.next) continue;
+      data[t.column as string] = t.next;
+      historyRows.push({
+        variantId,
+        field: t.field,
+        oldCents: old ?? null,
+        newCents: t.next,
+        scope,
+        note: dto.note ?? null,
+      });
+    }
+    if (historyRows.length === 0) return variant;
+
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.productVariant.update({ where: { id: variantId }, data }),
+      this.prisma.priceHistory.createMany({ data: historyRows }),
+    ]);
+
+    this.events.emitToOrg(organizationId, "price:updated", {
+      variantId,
+      productId: variant.productId,
+      scope,
+      prices: data,
+    });
+    return updated;
+  }
+
+  /** Immutable price-change log for a variant (newest first). */
+  async priceHistory(organizationId: string, variantId: string) {
+    await this.assertVariant(organizationId, variantId);
+    return this.prisma.priceHistory.findMany({
+      where: { variantId },
+      orderBy: { createdAt: "desc" },
+      take: 100,
     });
   }
 

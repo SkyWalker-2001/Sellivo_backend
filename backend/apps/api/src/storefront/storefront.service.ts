@@ -574,12 +574,19 @@ export class StorefrontService {
     return this.payments.handleWebhook({ gatewayRef, status });
   }
 
-  listOrders(organizationId: string, customerId: string) {
-    return this.prisma.order.findMany({
+  // The proof-of-delivery code is only meaningful (and only shown) once the
+  // order is out for delivery — mask it otherwise.
+  private maskOtp<T extends { status: string; deliveryOtp: string | null }>(o: T): T {
+    return o.status === "out_for_delivery" ? o : { ...o, deliveryOtp: null };
+  }
+
+  async listOrders(organizationId: string, customerId: string) {
+    const rows = await this.prisma.order.findMany({
       where: { organizationId, customerId },
       include: { items: true, payments: true },
       orderBy: { createdAt: "desc" },
     });
+    return rows.map((o) => this.maskOtp(o));
   }
 
   async getOrder(organizationId: string, customerId: string, id: string) {
@@ -588,7 +595,7 @@ export class StorefrontService {
       include: { items: true, payments: true },
     });
     if (!order) throw new NotFoundException("Order not found");
-    return order;
+    return this.maskOtp(order);
   }
 
   /** Customer-initiated cancellation, allowed only in early statuses. */

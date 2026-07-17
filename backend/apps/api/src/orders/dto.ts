@@ -72,10 +72,14 @@ const ORDER_STATUSES: OrderStatus[] = [
   "pending",
   "confirmed",
   "preparing",
+  "packed",
   "ready",
   "out_for_delivery",
+  "delivered",
   "completed",
   "cancelled",
+  "refund_requested",
+  "refund_approved",
   "refunded",
 ];
 
@@ -83,4 +87,23 @@ export class UpdateOrderStatusDto {
   @ApiProperty({ enum: ORDER_STATUSES })
   @IsIn(ORDER_STATUSES)
   status!: OrderStatus;
+
+  @ApiPropertyOptional({ description: "Optional note recorded in the status history" })
+  @IsOptional()
+  @IsString()
+  note?: string;
+}
+
+export class AssignOrderDto {
+  @ApiProperty({ description: "Delivery-role staff user id" })
+  @IsString()
+  @IsNotEmpty()
+  staffId!: string;
+}
+
+export class DeliverOrderDto {
+  @ApiProperty({ example: "1234", description: "4-digit code the customer reads out" })
+  @IsString()
+  @IsNotEmpty()
+  code!: string;
 }

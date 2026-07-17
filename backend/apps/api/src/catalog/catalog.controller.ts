@@ -1,12 +1,14 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from "@nestjs/common";
-import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from "@nestjs/common";
+import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from "@nestjs/swagger";
 import { CatalogService } from "./catalog.service";
 import {
   CreateCategoryDto,
   CreateProductDto,
   CreateVariantDto,
   ImportProductsDto,
+  ReorderCategoriesDto,
   UpdateCategoryDto,
+  UpdatePricesDto,
   UpdateProductDto,
   UpdateVariantDto,
 } from "./dto";
@@ -32,6 +34,13 @@ export class CatalogController {
     return this.catalog.listCategories(orgId);
   }
 
+  @Patch("categories/reorder")
+  @Roles("owner", "manager")
+  @ApiOperation({ summary: "Persist category display order" })
+  reorderCategories(@CurrentOrg() orgId: string, @Body() dto: ReorderCategoriesDto) {
+    return this.catalog.reorderCategories(orgId, dto.ids);
+  }
+
   @Patch("categories/:id")
   @Roles("owner", "manager")
   updateCategory(
@@ -40,6 +49,13 @@ export class CatalogController {
     @Body() dto: UpdateCategoryDto,
   ) {
     return this.catalog.updateCategory(orgId, id, dto);
+  }
+
+  @Delete("categories/:id")
+  @Roles("owner", "manager")
+  @ApiOperation({ summary: "Delete a category (its products become uncategorized)" })
+  deleteCategory(@CurrentOrg() orgId: string, @Param("id") id: string) {
+    return this.catalog.deleteCategory(orgId, id);
   }
 
   // Products
@@ -52,8 +68,26 @@ export class CatalogController {
 
   @Get("products")
   @ApiOperation({ summary: "List products with variants" })
-  listProducts(@CurrentOrg() orgId: string) {
-    return this.catalog.listProducts(orgId);
+  @ApiQuery({ name: "categoryId", required: false, description: 'Filter by category; "none" = uncategorized' })
+  @ApiQuery({ name: "q", required: false, description: "Search name/brand/SKU/barcode" })
+  @ApiQuery({ name: "skip", required: false, type: Number })
+  @ApiQuery({ name: "take", required: false, type: Number })
+  @ApiQuery({ name: "storeId", required: false, description: "Scope stock to one store (else summed)" })
+  listProducts(
+    @CurrentOrg() orgId: string,
+    @Query("categoryId") categoryId?: string,
+    @Query("q") q?: string,
+    @Query("skip") skip?: string,
+    @Query("take") take?: string,
+    @Query("storeId") storeId?: string,
+  ) {
+    return this.catalog.listProducts(orgId, {
+      categoryId,
+      q,
+      storeId,
+      skip: skip ? Number(skip) : undefined,
+      take: take ? Number(take) : undefined,
+    });
   }
 
   @Get("products/export")
@@ -105,6 +139,23 @@ export class CatalogController {
     @Body() dto: UpdateVariantDto,
   ) {
     return this.catalog.updateVariant(orgId, id, dto);
+  }
+
+  @Patch("variants/:id/prices")
+  @Roles("owner", "manager")
+  @ApiOperation({ summary: "Update price tiers; logs history + broadcasts price:updated" })
+  updatePrices(
+    @CurrentOrg() orgId: string,
+    @Param("id") id: string,
+    @Body() dto: UpdatePricesDto,
+  ) {
+    return this.catalog.updatePrices(orgId, id, dto);
+  }
+
+  @Get("variants/:id/price-history")
+  @ApiOperation({ summary: "Immutable price-change log for a variant" })
+  priceHistory(@CurrentOrg() orgId: string, @Param("id") id: string) {
+    return this.catalog.priceHistory(orgId, id);
   }
 
   @Delete("products/:id")

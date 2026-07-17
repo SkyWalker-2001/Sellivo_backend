@@ -1,5 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import type { OrderStatus } from "@prisma/client";
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import type { OrderStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { InventoryService } from "../inventory/inventory.service";
 import { EventsGateway } from "../events/events.gateway";
@@ -114,6 +119,7 @@ export class OrdersService {
           deliverySlot: dto.deliverySlot ?? null,
           notes: dto.notes ?? null,
           items: { create: lines },
+          statusHistory: { create: { status: "pending" } },
         },
         include: { items: true },
       });
@@ -140,47 +146,183 @@ export class OrdersService {
     });
   }
 
+  /** Full order for the detail screen: line items with product, payments,
+   *  customer, and the status timeline (oldest → newest). */
   async get(organizationId: string, id: string) {
     const order = await this.prisma.order.findFirst({
       where: { id, organizationId },
-      include: { items: true, payments: true },
+      include: {
+        items: { include: { variant: { include: { product: true } } } },
+        payments: true,
+        customer: true,
+        assignedTo: { select: { id: true, name: true } },
+        statusHistory: { orderBy: { createdAt: "asc" } },
+      },
     });
     if (!order) throw new NotFoundException("Order not found");
     return order;
   }
 
-  list(organizationId: string) {
+  /** Paginated, searchable order list for the OMS. Search matches order id,
+   *  customer name/phone, and delivery address. */
+  async list(
+    organizationId: string,
+    opts: { storeId?: string; q?: string; status?: string; skip?: number; take?: number } = {},
+  ) {
+    const skip = opts.skip && opts.skip > 0 ? opts.skip : undefined;
+    const take = opts.take && opts.take > 0 ? Math.min(opts.take, 100) : undefined;
+    const where: Prisma.OrderWhereInput = {
+      organizationId,
+      ...(opts.storeId ? { storeId: opts.storeId } : {}),
+      ...(opts.status && opts.status !== "all" ? { status: opts.status as OrderStatus } : {}),
+    };
+    const q = opts.q?.trim();
+    if (q) {
+      where.OR = [
+        { id: { contains: q, mode: "insensitive" } },
+        { deliveryAddress: { contains: q, mode: "insensitive" } },
+        { customer: { name: { contains: q, mode: "insensitive" } } },
+        { customer: { phone: { contains: q, mode: "insensitive" } } },
+      ];
+    }
     return this.prisma.order.findMany({
-      where: { organizationId },
+      where,
       orderBy: { createdAt: "desc" },
-      include: { items: true },
+      include: {
+        items: true,
+        payments: true,
+        customer: true,
+        assignedTo: { select: { id: true, name: true } },
+      },
+      skip,
+      take,
     });
   }
 
-  async updateStatus(organizationId: string, id: string, status: OrderStatus) {
+  async updateStatus(
+    organizationId: string,
+    id: string,
+    status: OrderStatus,
+    note?: string,
+  ) {
     const order = await this.get(organizationId, id);
     if (order.status !== status && !this.canTransition(order.status, status)) {
       throw new BadRequestException(`Cannot move an order from ${order.status} to ${status}`);
     }
-    const updated = await this.prisma.order.update({ where: { id }, data: { status } });
-    // Notify owner dashboards (and, later, the customer) of the status change.
-    this.events.emitToOrg(organizationId, "order:updated", { id: updated.id, status: updated.status });
+    const data: Prisma.OrderUpdateInput = { status };
+    // Generate the 4-digit proof-of-delivery code when dispatch starts.
+    if (status === "out_for_delivery" && !order.deliveryOtp) {
+      data.deliveryOtp = String(Math.floor(1000 + Math.random() * 9000));
+    }
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.order.update({ where: { id }, data }),
+      this.prisma.orderStatusHistory.create({
+        data: { orderId: id, status, note: note?.trim() || null },
+      }),
+    ]);
+    // Broadcast so owner / customer / delivery clients refresh in realtime.
+    this.events.emitToOrg(organizationId, "order:updated", {
+      id: updated.id,
+      status: updated.status,
+    });
     return updated;
+  }
+
+  /** Assign an order to a delivery-role staff member. */
+  async assign(organizationId: string, id: string, staffId: string) {
+    const order = await this.prisma.order.findFirst({ where: { id, organizationId } });
+    if (!order) throw new NotFoundException("Order not found");
+    const staff = await this.prisma.user.findFirst({
+      where: { id: staffId, organizationId, role: "delivery" },
+    });
+    if (!staff) throw new BadRequestException("Pick a delivery staff member");
+    await this.prisma.order.update({ where: { id }, data: { assignedToId: staffId } });
+    this.events.emitToOrg(organizationId, "order:updated", { id, status: order.status });
+    return this.get(organizationId, id);
+  }
+
+  /** A rider's active deliveries. The proof-of-delivery code is never returned
+   *  to the rider — the customer reads it out to confirm delivery. */
+  async assignedOrders(organizationId: string, userId: string) {
+    const rows = await this.prisma.order.findMany({
+      where: {
+        organizationId,
+        assignedToId: userId,
+        status: { in: ["confirmed", "preparing", "packed", "ready", "out_for_delivery"] },
+      },
+      orderBy: { createdAt: "desc" },
+      include: {
+        items: { include: { variant: { include: { product: true } } } },
+        customer: true,
+        statusHistory: { orderBy: { createdAt: "asc" } },
+      },
+    });
+    return rows.map(({ deliveryOtp: _otp, ...o }) => o);
+  }
+
+  /** Rider marks an order delivered by entering the customer's 4-digit code. */
+  async deliver(organizationId: string, id: string, userId: string, code: string) {
+    const order = await this.prisma.order.findFirst({ where: { id, organizationId } });
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.assignedToId !== userId) {
+      throw new ForbiddenException("This order isn't assigned to you");
+    }
+    if (order.status !== "out_for_delivery") {
+      throw new BadRequestException("Order is not out for delivery");
+    }
+    if (!order.deliveryOtp || order.deliveryOtp !== code.trim()) {
+      throw new BadRequestException("Incorrect delivery code");
+    }
+    await this.prisma.$transaction([
+      this.prisma.order.update({ where: { id }, data: { status: "delivered" } }),
+      this.prisma.orderStatusHistory.create({
+        data: { orderId: id, status: "delivered", note: "Delivered — code verified" },
+      }),
+    ]);
+    this.events.emitToOrg(organizationId, "order:updated", { id, status: "delivered" });
+    return this.get(organizationId, id);
+  }
+
+  /** Order-dashboard KPIs: today's orders/revenue/AOV + a per-status breakdown. */
+  async summary(organizationId: string, storeId?: string) {
+    const where: Prisma.OrderWhereInput = {
+      organizationId,
+      ...(storeId ? { storeId } : {}),
+    };
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const [grouped, todayOrders, todayAgg] = await Promise.all([
+      this.prisma.order.groupBy({ by: ["status"], where, _count: { _all: true } }),
+      this.prisma.order.count({ where: { ...where, createdAt: { gte: startOfToday } } }),
+      this.prisma.order.aggregate({
+        where: { ...where, createdAt: { gte: startOfToday }, status: { not: "cancelled" } },
+        _sum: { totalCents: true },
+      }),
+    ]);
+    const byStatus: Record<string, number> = {};
+    for (const g of grouped) byStatus[g.status] = g._count._all;
+    const todayRevenueCents = todayAgg._sum.totalCents ?? 0;
+    const aovCents = todayOrders > 0 ? Math.round(todayRevenueCents / todayOrders) : 0;
+    return { todayOrders, todayRevenueCents, aovCents, byStatus };
   }
 
   /**
    * Allowed order lifecycle transitions. Any active order can be cancelled;
-   * a completed order can be refunded. Cancelled/refunded are terminal.
+   * a completed order can enter the refund flow. Terminal: cancelled, refunded.
    */
   private canTransition(from: OrderStatus, to: OrderStatus): boolean {
     const flow: Record<OrderStatus, OrderStatus[]> = {
       pending: ["confirmed", "cancelled"],
       confirmed: ["preparing", "cancelled"],
-      preparing: ["ready", "cancelled"],
+      preparing: ["packed", "ready", "cancelled"],
+      packed: ["ready", "cancelled"],
       ready: ["out_for_delivery", "completed", "cancelled"],
-      out_for_delivery: ["completed", "cancelled"],
-      completed: ["refunded"],
+      out_for_delivery: ["delivered", "cancelled"],
+      delivered: ["completed", "refund_requested"],
+      completed: ["refund_requested"],
       cancelled: [],
+      refund_requested: ["refund_approved", "cancelled"],
+      refund_approved: ["refunded"],
       refunded: [],
     };
     return flow[from]?.includes(to) ?? false;
