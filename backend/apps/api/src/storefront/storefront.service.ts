@@ -14,7 +14,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { OrdersService } from "../orders/orders.service";
 import { PaymentsService } from "../payments/payments.service";
 import { SmsService } from "./sms.service";
-import type { AddressDto, CheckoutDto, CustomerLoginDto, CustomerRegisterDto } from "./dto";
+import type { AddressDto, CheckoutDto, CustomerLoginDto, CustomerRegisterDto, SetCartDto } from "./dto";
 import type { CustomerTokenPayload } from "./customer-auth";
 
 interface OtpEntry {
@@ -468,6 +468,8 @@ export class StorefrontService {
       orderId: order.id,
       method: "online",
     });
+    // Order placed — empty the persisted cart.
+    await this.clearCart(customerId);
     return { order, payment };
   }
 
@@ -529,6 +531,8 @@ export class StorefrontService {
         line2: dto.line2 ?? null,
         city: dto.city,
         pincode: dto.pincode,
+        latitude: dto.latitude ?? null,
+        longitude: dto.longitude ?? null,
         isDefault: dto.isDefault ?? count === 0,
       },
     });
@@ -555,6 +559,8 @@ export class StorefrontService {
         line2: dto.line2 ?? null,
         city: dto.city,
         pincode: dto.pincode,
+        latitude: dto.latitude ?? null,
+        longitude: dto.longitude ?? null,
         isDefault: dto.isDefault ?? existing.isDefault,
       },
     });
@@ -567,6 +573,85 @@ export class StorefrontService {
     if (!existing) throw new NotFoundException("Address not found");
     await this.prisma.customerAddress.delete({ where: { id } });
     return { deleted: true };
+  }
+
+  // ── Server-side cart ───────────────────────────────────────────────────────
+  /** The customer's persisted cart, hydrated with live product/price details. */
+  async getCart(customerId: string) {
+    const rows = await this.prisma.cartItem.findMany({
+      where: { customerId },
+      orderBy: { createdAt: "asc" },
+      include: { variant: { include: { product: true } } },
+    });
+    // Drop rows whose variant/product vanished from the catalog.
+    const live = rows.filter((r) => r.variant && r.variant.product);
+
+    // On-hand stock per variant (summed across the org's stores) so the cart can
+    // show an in-stock badge and cap quantities. One grouped query.
+    const variantIds = live.map((r) => r.variantId);
+    const stockByVariant = new Map<string, number>();
+    if (variantIds.length > 0) {
+      const sums = await this.prisma.inventory.groupBy({
+        by: ["variantId"],
+        where: { variantId: { in: variantIds } },
+        _sum: { onHand: true },
+      });
+      for (const s of sums) stockByVariant.set(s.variantId, s._sum.onHand ?? 0);
+    }
+
+    return live.map((r) => ({
+      variantId: r.variantId,
+      productId: r.variant.productId,
+      name: r.variant.product.name,
+      priceCents: r.variant.priceCents,
+      mrpCents: r.variant.mrpCents ?? null,
+      weight: r.variant.weight ?? null,
+      unit: r.variant.unit ?? null,
+      stock: stockByVariant.get(r.variantId) ?? null,
+      quantity: r.quantity,
+      images: Array.isArray(r.variant.product.images)
+        ? (r.variant.product.images as string[])
+        : [],
+    }));
+  }
+
+  /** Replace the whole cart with [dto.items] (client is the source of truth). */
+  async setCart(organizationId: string, customerId: string, dto: SetCartDto) {
+    // Collapse duplicate variant lines by summing quantity.
+    const merged = new Map<string, number>();
+    for (const item of dto.items) {
+      if (item.quantity <= 0) continue;
+      merged.set(item.variantId, (merged.get(item.variantId) ?? 0) + item.quantity);
+    }
+    // Keep only variants that actually belong to this org's catalog.
+    const validVariants = await this.prisma.productVariant.findMany({
+      where: {
+        id: { in: [...merged.keys()] },
+        product: { organizationId },
+      },
+      select: { id: true },
+    });
+    const validIds = new Set(validVariants.map((v) => v.id));
+
+    await this.prisma.$transaction([
+      this.prisma.cartItem.deleteMany({ where: { customerId } }),
+      this.prisma.cartItem.createMany({
+        data: [...merged.entries()]
+          .filter(([variantId]) => validIds.has(variantId))
+          .map(([variantId, quantity]) => ({
+            organizationId,
+            customerId,
+            variantId,
+            quantity,
+          })),
+      }),
+    ]);
+    return this.getCart(customerId);
+  }
+
+  async clearCart(customerId: string) {
+    await this.prisma.cartItem.deleteMany({ where: { customerId } });
+    return { cleared: true };
   }
 
   /** Dev helper standing in for the Razorpay webhook during local testing. */

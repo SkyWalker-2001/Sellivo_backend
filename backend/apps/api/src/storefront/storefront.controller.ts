@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Put, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { StorefrontService } from "./storefront.service";
 import {
@@ -11,6 +11,7 @@ import {
   GoogleAuthDto,
   OtpRequestDto,
   OtpVerifyDto,
+  SetCartDto,
   ValidateCouponDto,
 } from "./dto";
 import { Public } from "../common/decorators";
@@ -207,6 +208,34 @@ export class StorefrontController {
   @Delete("addresses/:id")
   deleteAddress(@CurrentCustomer() customer: AuthCustomer, @Param("id") id: string) {
     return this.storefront.deleteAddress(customer.customerId, id);
+  }
+
+  // ── Cart ─────────────────────────────────────────────────────────────────────
+  @Public()
+  @UseGuards(CustomerAuthGuard)
+  @ApiBearerAuth()
+  @Get("cart")
+  @ApiOperation({ summary: "The signed-in customer's persisted cart" })
+  getCart(@CurrentCustomer() customer: AuthCustomer) {
+    return this.storefront.getCart(customer.customerId);
+  }
+
+  @Public()
+  @UseGuards(CustomerAuthGuard)
+  @ApiBearerAuth()
+  @Put("cart")
+  @ApiOperation({ summary: "Replace the cart with the given items" })
+  setCart(@CurrentCustomer() customer: AuthCustomer, @Body() dto: SetCartDto) {
+    return this.storefront.setCart(customer.organizationId, customer.customerId, dto);
+  }
+
+  @Public()
+  @UseGuards(CustomerAuthGuard)
+  @ApiBearerAuth()
+  @Delete("cart")
+  @ApiOperation({ summary: "Empty the cart" })
+  clearCart(@CurrentCustomer() customer: AuthCustomer) {
+    return this.storefront.clearCart(customer.customerId);
   }
 
   @Public()

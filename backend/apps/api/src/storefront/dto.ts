@@ -7,6 +7,7 @@ import {
   IsIn,
   IsInt,
   IsNotEmpty,
+  IsNumber,
   IsOptional,
   IsString,
   Max,
@@ -99,6 +100,26 @@ export class CheckoutDto {
   notes?: string;
 }
 
+export class CartItemDto {
+  @ApiProperty()
+  @IsString()
+  @IsNotEmpty()
+  variantId!: string;
+
+  @ApiProperty({ example: 1 })
+  @IsInt()
+  @Min(1)
+  quantity!: number;
+}
+
+export class SetCartDto {
+  @ApiProperty({ type: [CartItemDto], description: "Full cart contents (replaces the stored cart)" })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CartItemDto)
+  items!: CartItemDto[];
+}
+
 export class ValidateCouponDto {
   @ApiProperty({ example: "SAVE10" })
   @IsString()
@@ -146,6 +167,16 @@ export class AddressDto {
   @IsString()
   @IsNotEmpty()
   pincode!: string;
+
+  @ApiPropertyOptional({ example: 12.9716 })
+  @IsOptional()
+  @IsNumber()
+  latitude?: number;
+
+  @ApiPropertyOptional({ example: 77.5946 })
+  @IsOptional()
+  @IsNumber()
+  longitude?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
