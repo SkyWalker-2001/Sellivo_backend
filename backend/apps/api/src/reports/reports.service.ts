@@ -61,7 +61,7 @@ export class ReportsService {
    * profit/AOV, order-status counts, top products & categories, catalog/customer
    * counts, stock alerts, a daily time-series, and recent orders.
    */
-  async dashboard(organizationId: string, days: number, storeId?: string, lowStockThreshold = 10) {
+  async dashboard(organizationId: string, days: number, storeId?: string, _lowStockThreshold = 10) {
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
@@ -83,7 +83,7 @@ export class ReportsService {
         this.prisma.product.count({ where: { organizationId } }),
         this.prisma.inventory.findMany({
           where: { store: { organizationId }, ...(storeId ? { storeId } : {}) },
-          select: { onHand: true },
+          select: { onHand: true, lowStockThreshold: true },
         }),
         this.prisma.productVariant.findMany({
           where: { product: { organizationId } },
@@ -190,7 +190,11 @@ export class ReportsService {
       posSaleCount: posSales.length,
       customersCount,
       productsCount,
-      lowStockCount: inventory.filter((i) => i.onHand > 0 && i.onHand <= lowStockThreshold).length,
+      // Low-stock now uses each item's owner-set per-store threshold (matches
+      // the low-stock bell/report); items with no threshold aren't counted.
+      lowStockCount: inventory.filter(
+        (i) => i.onHand > 0 && i.lowStockThreshold != null && i.onHand <= i.lowStockThreshold,
+      ).length,
       outOfStockCount: inventory.filter((i) => i.onHand <= 0).length,
       statusCounts,
       topProducts,
@@ -315,7 +319,7 @@ export class ReportsService {
    * over the last 7 days from the movement ledger. PO/transfer counts are 0
    * until those modules exist.
    */
-  async inventorySummary(organizationId: string, threshold: number, storeId?: string) {
+  async inventorySummary(organizationId: string, _threshold: number, storeId?: string) {
     const expiryWindowDays = 30;
     const [totalProducts, totalCategories, rows, lastMovement] = await Promise.all([
       this.prisma.product.count({ where: { organizationId } }),
@@ -364,10 +368,18 @@ export class ReportsService {
     for (const v of perVariant.values()) {
       totalStockUnits += v.onHand;
       inventoryValueCents += v.onHand * (v.costCents ?? v.priceCents ?? 0);
-      if (v.onHand <= 0) outOfStockCount++;
-      else if (v.onHand <= threshold) lowStockCount++;
-      else inStockCount++;
       if (v.onHand > 0 && v.expiryDate && v.expiryDate <= expiryCutoff) expiringSoonCount++;
+    }
+    // In/low/out are counted per (store, variant) row using each item's own
+    // owner-set threshold (matches the low-stock bell). Low requires a threshold.
+    for (const r of rows) {
+      if (r.onHand <= 0) {
+        outOfStockCount++;
+      } else if (r.lowStockThreshold != null && r.onHand <= r.lowStockThreshold) {
+        lowStockCount++;
+      } else {
+        inStockCount++;
+      }
     }
 
     // Reconstruct end-of-day total on-hand for the last 7 days: current total
