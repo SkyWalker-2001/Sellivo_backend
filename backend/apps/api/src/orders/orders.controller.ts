@@ -66,8 +66,9 @@ export class OrdersController {
     @CurrentOrg() orgId: string,
     @Param("id") id: string,
     @Body() dto: UpdateOrderStatusDto,
+    @CurrentUser("role") role: string,
   ) {
-    return this.orders.updateStatus(orgId, id, dto.status, dto.note);
+    return this.orders.updateStatus(orgId, id, dto.status, dto.note, role);
   }
 
   @Patch(":id/assign")

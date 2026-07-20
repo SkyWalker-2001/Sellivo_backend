@@ -204,22 +204,47 @@ export class OrdersService {
     id: string,
     status: OrderStatus,
     note?: string,
+    role?: string,
   ) {
     const order = await this.get(organizationId, id);
     if (order.status !== status && !this.canTransition(order.status, status)) {
       throw new BadRequestException(`Cannot move an order from ${order.status} to ${status}`);
+    }
+    // Owner confirmation gate: a customer order sits in `pending` until the
+    // owner (or a manager) confirms it. Cashiers/riders cannot confirm.
+    if (
+      order.status === "pending" &&
+      status === "confirmed" &&
+      !["owner", "manager"].includes(role ?? "")
+    ) {
+      throw new ForbiddenException("Only the owner or a manager can confirm an order");
     }
     const data: Prisma.OrderUpdateInput = { status };
     // Generate the 4-digit proof-of-delivery code when dispatch starts.
     if (status === "out_for_delivery" && !order.deliveryOtp) {
       data.deliveryOtp = String(Math.floor(1000 + Math.random() * 9000));
     }
-    const [updated] = await this.prisma.$transaction([
-      this.prisma.order.update({ where: { id }, data }),
-      this.prisma.orderStatusHistory.create({
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const u = await tx.order.update({ where: { id }, data });
+      await tx.orderStatusHistory.create({
         data: { orderId: id, status, note: note?.trim() || null },
-      }),
-    ]);
+      });
+      // Restock when an order is cancelled — its stock was decremented at
+      // create, so a rejection/cancellation must return it to inventory.
+      if (status === "cancelled" && order.status !== "cancelled") {
+        for (const item of order.items) {
+          await this.inventory.applyMovement(tx, {
+            storeId: order.storeId,
+            variantId: item.variantId,
+            delta: item.quantity,
+            reason: "restock",
+            source: "system",
+            refId: id,
+          });
+        }
+      }
+      return u;
+    });
     // Broadcast so owner / customer / delivery clients refresh in realtime.
     this.events.emitToOrg(organizationId, "order:updated", {
       id: updated.id,
