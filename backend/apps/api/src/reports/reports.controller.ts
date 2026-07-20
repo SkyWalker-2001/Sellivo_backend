@@ -1,4 +1,4 @@
-import { Controller, DefaultValuePipe, Get, ParseIntPipe, Query } from "@nestjs/common";
+import { Controller, DefaultValuePipe, Get, Param, ParseIntPipe, Patch, Query } from "@nestjs/common";
 import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from "@nestjs/swagger";
 import { ReportsService } from "./reports.service";
 import { CurrentOrg, Roles } from "../common/decorators";
@@ -44,6 +44,19 @@ export class ReportsController {
     @Query("storeId") storeId?: string,
   ) {
     return this.reports.lowStock(orgId, threshold, storeId);
+  }
+
+  @Get("stock-alerts")
+  @ApiOperation({ summary: "Owner low-stock alerts feed (unresolved)" })
+  @ApiQuery({ name: "storeId", required: false })
+  stockAlerts(@CurrentOrg() orgId: string, @Query("storeId") storeId?: string) {
+    return this.reports.stockAlerts(orgId, storeId);
+  }
+
+  @Patch("stock-alerts/:id/read")
+  @ApiOperation({ summary: "Mark a low-stock alert as read" })
+  markAlertRead(@CurrentOrg() orgId: string, @Param("id") id: string) {
+    return this.reports.markAlertRead(orgId, id);
   }
 
   @Get("expiring")

@@ -1,4 +1,4 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
 
 @Injectable()
@@ -201,12 +201,17 @@ export class ReportsService {
   }
 
   /** Variants at or below a stock threshold, for owner low-stock alerts. */
-  async lowStock(organizationId: string, threshold: number, storeId?: string) {
+  /**
+   * Items at/below their owner-set per-store low-stock threshold. Only items
+   * that have a `lowStockThreshold` configured are considered (no global default).
+   * The legacy `threshold` query param is ignored.
+   */
+  async lowStock(organizationId: string, _threshold: number, storeId?: string) {
     const rows = await this.prisma.inventory.findMany({
       where: {
         store: { organizationId },
         ...(storeId ? { storeId } : {}),
-        onHand: { lte: threshold },
+        lowStockThreshold: { not: null },
       },
       include: {
         store: { select: { id: true, name: true } },
@@ -214,15 +219,61 @@ export class ReportsService {
       },
       orderBy: { onHand: "asc" },
     });
-    return rows.map((r) => ({
-      storeId: r.storeId,
-      storeName: r.store.name,
-      variantId: r.variantId,
-      sku: r.variant.sku,
-      barcode: r.variant.barcode,
-      productName: r.variant.product.name,
-      onHand: r.onHand,
+    return rows
+      .filter((r) => r.lowStockThreshold != null && r.onHand <= r.lowStockThreshold)
+      .map((r) => ({
+        storeId: r.storeId,
+        storeName: r.store.name,
+        variantId: r.variantId,
+        sku: r.variant.sku,
+        barcode: r.variant.barcode,
+        productName: r.variant.product.name,
+        onHand: r.onHand,
+        threshold: r.lowStockThreshold,
+      }));
+  }
+
+  /** Owner low-stock alerts feed (unresolved), newest first, with product info. */
+  async stockAlerts(organizationId: string, storeId?: string) {
+    const alerts = await this.prisma.stockAlert.findMany({
+      where: { organizationId, resolvedAt: null, ...(storeId ? { storeId } : {}) },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+    if (alerts.length === 0) return [];
+    const variantIds = [...new Set(alerts.map((a) => a.variantId))];
+    const storeIds = [...new Set(alerts.map((a) => a.storeId))];
+    const [variants, stores] = await Promise.all([
+      this.prisma.productVariant.findMany({
+        where: { id: { in: variantIds } },
+        include: { product: { select: { name: true } } },
+      }),
+      this.prisma.store.findMany({
+        where: { id: { in: storeIds } },
+        select: { id: true, name: true },
+      }),
+    ]);
+    const vById = new Map(variants.map((v) => [v.id, v]));
+    const sById = new Map(stores.map((s) => [s.id, s.name]));
+    return alerts.map((a) => ({
+      id: a.id,
+      storeId: a.storeId,
+      storeName: sById.get(a.storeId) ?? "",
+      variantId: a.variantId,
+      sku: vById.get(a.variantId)?.sku ?? "",
+      productName: vById.get(a.variantId)?.product.name ?? "",
+      threshold: a.threshold,
+      onHand: a.onHand,
+      readAt: a.readAt,
+      createdAt: a.createdAt,
     }));
+  }
+
+  /** Mark a single low-stock alert as read/seen. */
+  async markAlertRead(organizationId: string, id: string) {
+    const alert = await this.prisma.stockAlert.findFirst({ where: { id, organizationId } });
+    if (!alert) throw new NotFoundException("Alert not found");
+    return this.prisma.stockAlert.update({ where: { id }, data: { readAt: new Date() } });
   }
 
   /**

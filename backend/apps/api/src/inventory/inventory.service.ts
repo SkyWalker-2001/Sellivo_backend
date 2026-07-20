@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import type { MovementReason, MovementSource, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { EventsGateway } from "../events/events.gateway";
 import type { CreateMovementDto } from "./dto";
 
 /** A single ledger entry to apply. `id` is client-supplied for offline POS idempotency. */
@@ -17,7 +18,10 @@ export interface MovementInput {
 
 @Injectable()
 export class InventoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: EventsGateway,
+  ) {}
 
   /**
    * Apply one movement inside a transaction: append the append-only ledger row
@@ -49,7 +53,81 @@ export class InventoryService {
       create: { storeId: m.storeId, variantId: m.variantId, onHand: m.delta },
       update: { onHand: { increment: m.delta } },
     });
+    await this.evaluateLowStock(tx, m.storeId, m.variantId);
     return { applied: true };
+  }
+
+  /**
+   * Raise or resolve a [StockAlert] for a (store, variant) after its on-hand
+   * changed. Only acts when the owner has configured a lowStockThreshold. Keeps
+   * at most one open alert per item; resolves it once a restock lifts stock back
+   * above the threshold so it can fire again next time.
+   */
+  private async evaluateLowStock(
+    tx: Prisma.TransactionClient,
+    storeId: string,
+    variantId: string,
+  ): Promise<void> {
+    const inv = await tx.inventory.findUnique({
+      where: { storeId_variantId: { storeId, variantId } },
+      select: { onHand: true, lowStockThreshold: true },
+    });
+    if (inv?.lowStockThreshold == null) return;
+
+    const open = await tx.stockAlert.findFirst({
+      where: { storeId, variantId, resolvedAt: null },
+    });
+    if (inv.onHand <= inv.lowStockThreshold) {
+      if (open) return; // already alerted; don't spam
+      const store = await tx.store.findUnique({
+        where: { id: storeId },
+        select: { organizationId: true },
+      });
+      if (!store) return;
+      await tx.stockAlert.create({
+        data: {
+          organizationId: store.organizationId,
+          storeId,
+          variantId,
+          threshold: inv.lowStockThreshold,
+          onHand: inv.onHand,
+        },
+      });
+      this.events.emitToOrg(store.organizationId, "stock:low", {
+        storeId,
+        variantId,
+        onHand: inv.onHand,
+        threshold: inv.lowStockThreshold,
+      });
+    } else if (open) {
+      await tx.stockAlert.update({
+        where: { id: open.id },
+        data: { resolvedAt: new Date() },
+      });
+    }
+  }
+
+  /** Owner sets (or clears, with null) the per-store low-stock alert threshold. */
+  async setThreshold(
+    organizationId: string,
+    storeId: string,
+    variantId: string,
+    threshold: number | null,
+  ) {
+    await this.assertStore(organizationId, storeId);
+    await this.assertVariant(organizationId, variantId);
+    if (threshold != null && threshold < 0) {
+      throw new BadRequestException("threshold must be >= 0");
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const inv = await tx.inventory.upsert({
+        where: { storeId_variantId: { storeId, variantId } },
+        create: { storeId, variantId, onHand: 0, lowStockThreshold: threshold },
+        update: { lowStockThreshold: threshold },
+      });
+      await this.evaluateLowStock(tx, storeId, variantId);
+      return inv;
+    });
   }
 
   /** Owner-app manual movement (restock / adjustment / return). */

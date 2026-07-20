@@ -368,6 +368,9 @@ model Inventory {
   storeId   String
   variantId String
   onHand    Int      @default(0)
+  // Owner-set per-store low-stock alert threshold. When set and onHand drops to
+  // or below it, a StockAlert is raised. Null = no low-stock alert for this item.
+  lowStockThreshold Int?
   updatedAt DateTime @updatedAt
 
   store   Store          @relation(fields: [storeId], references: [id], onDelete: Cascade)
@@ -398,6 +401,25 @@ model InventoryMovement {
   @@index([storeId, variantId])
   @@index([storeId, createdAt])
   @@map("inventory_movements")
+}
+
+// Owner-facing low-stock alert. Raised when a (store,variant) with a configured
+// lowStockThreshold drops to/below it; resolved when a restock lifts it back
+// above. `readAt` tracks the owner dismissing/seeing it in the alerts feed.
+model StockAlert {
+  id             String    @id @default(uuid())
+  organizationId String
+  storeId        String
+  variantId      String
+  threshold      Int
+  onHand         Int
+  readAt         DateTime?
+  resolvedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([organizationId, resolvedAt])
+  @@index([storeId, variantId])
+  @@map("stock_alerts")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
