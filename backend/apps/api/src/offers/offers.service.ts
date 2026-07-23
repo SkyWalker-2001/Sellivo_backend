@@ -24,7 +24,7 @@ export class OffersService {
         organizationId,
         code,
         type: dto.type,
-        value: dto.value,
+        value: dto.type === "free_delivery" ? 0 : (dto.value ?? 0),
         minSubtotalCents: dto.minSubtotalCents ?? 0,
         active: dto.active ?? true,
       },
@@ -38,7 +38,7 @@ export class OffersService {
       data: {
         code: dto.code.trim().toUpperCase(),
         type: dto.type,
-        value: dto.value,
+        value: dto.type === "free_delivery" ? 0 : (dto.value ?? 0),
         minSubtotalCents: dto.minSubtotalCents ?? 0,
         active: dto.active ?? true,
       },

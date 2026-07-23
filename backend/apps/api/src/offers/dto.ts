@@ -7,14 +7,18 @@ export class UpsertCouponDto {
   @IsNotEmpty()
   code!: string;
 
-  @ApiProperty({ enum: ["percent", "flat"], example: "percent" })
-  @IsIn(["percent", "flat"])
-  type!: "percent" | "flat";
+  @ApiProperty({ enum: ["percent", "flat", "free_delivery"], example: "percent" })
+  @IsIn(["percent", "flat", "free_delivery"])
+  type!: "percent" | "flat" | "free_delivery";
 
-  @ApiProperty({ example: 10, description: "percent (1-100) or flat minor units" })
+  @ApiPropertyOptional({
+    example: 10,
+    description: "percent (1-100) or flat minor units; ignored for free_delivery",
+  })
+  @IsOptional()
   @IsInt()
   @Min(0)
-  value!: number;
+  value?: number;
 
   @ApiPropertyOptional({ example: 20000 })
   @IsOptional()

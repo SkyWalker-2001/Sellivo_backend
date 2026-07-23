@@ -475,18 +475,22 @@ export class StorefrontService {
 
   /** Validate a promo code against a subtotal, returning the discount. */
   async validateCoupon(organizationId: string, code: string, subtotalCents: number) {
-    const discountCents = await this.orders.computeDiscountCents(
+    const { discountCents, freeDelivery } = await this.orders.resolveCoupon(
       organizationId,
       code,
       subtotalCents,
     );
+    const valid = discountCents > 0 || freeDelivery;
     return {
       code: code.trim().toUpperCase(),
-      valid: discountCents > 0,
+      valid,
       discountCents,
-      message: discountCents > 0
-        ? `You saved ₹${(discountCents / 100).toFixed(0)}`
-        : "This code isn't valid for your cart.",
+      freeDelivery,
+      message: freeDelivery
+        ? "Free delivery unlocked 🎉"
+        : discountCents > 0
+          ? `You saved ₹${(discountCents / 100).toFixed(0)}`
+          : "This code isn't valid for your cart.",
     };
   }
 

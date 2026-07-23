@@ -11,7 +11,9 @@ import { EventsGateway } from "../events/events.gateway";
 import type { CreateOrderDto } from "./dto";
 
 // Storefront pricing rules (kept here so totals are computed server-side).
-const GST_RATE = 0.05; // 5% GST on the discounted subtotal
+// GST is included in the selling price, so we back-calculate the embedded tax
+// portion (rate / (1 + rate)) for display; it is NOT added on top of the total.
+const GST_RATE = 0.05; // 5% GST, already included in the selling price
 const DELIVERY_FEE_CENTS = 2500; // ₹25 delivery
 const FREE_DELIVERY_THRESHOLD_CENTS = 50000; // free over ₹500
 
@@ -32,16 +34,33 @@ export class OrdersService {
     code: string | undefined,
     subtotalCents: number,
   ): Promise<number> {
-    if (!code) return 0;
+    return (await this.resolveCoupon(organizationId, code, subtotalCents)).discountCents;
+  }
+
+  /**
+   * Resolve a coupon to its full effect: a subtotal discount and/or a waived
+   * delivery fee. Returns zeros when the code is unknown/inactive or the minimum
+   * spend isn't met.
+   */
+  async resolveCoupon(
+    organizationId: string,
+    code: string | undefined,
+    subtotalCents: number,
+  ): Promise<{ discountCents: number; freeDelivery: boolean }> {
+    const none = { discountCents: 0, freeDelivery: false };
+    if (!code) return none;
     const coupon = await this.prisma.coupon.findFirst({
       where: { organizationId, code: code.trim().toUpperCase(), active: true },
     });
-    if (!coupon || subtotalCents < coupon.minSubtotalCents) return 0;
+    if (!coupon || subtotalCents < coupon.minSubtotalCents) return none;
+    if (coupon.type === "free_delivery") {
+      return { discountCents: 0, freeDelivery: true };
+    }
     const raw =
       coupon.type === "percent"
         ? Math.round((subtotalCents * coupon.value) / 100)
         : coupon.value;
-    return Math.min(raw, subtotalCents); // never discount below zero
+    return { discountCents: Math.min(raw, subtotalCents), freeDelivery: false };
   }
 
   /**
@@ -78,18 +97,21 @@ export class OrdersService {
     const subtotalCents = lines.reduce((s, l) => s + l.totalCents, 0);
 
     // Bill breakdown (server-authoritative): discount → GST → delivery.
-    const discountCents = await this.computeDiscountCents(
+    const { discountCents, freeDelivery } = await this.resolveCoupon(
       organizationId,
       dto.couponCode,
       subtotalCents,
     );
     const taxedBase = subtotalCents - discountCents;
-    const taxCents = Math.round(taxedBase * GST_RATE);
+    // GST-inclusive: tax is the portion already embedded in taxedBase, not an add-on.
+    const taxCents = Math.round((taxedBase * GST_RATE) / (1 + GST_RATE));
     const deliveryFeeCents =
-      dto.fulfillmentType === "delivery" && taxedBase < FREE_DELIVERY_THRESHOLD_CENTS
+      dto.fulfillmentType === "delivery" &&
+      !freeDelivery &&
+      taxedBase < FREE_DELIVERY_THRESHOLD_CENTS
         ? DELIVERY_FEE_CENTS
         : 0;
-    const totalCents = taxedBase + taxCents + deliveryFeeCents;
+    const totalCents = taxedBase + deliveryFeeCents;
 
     return this.prisma.$transaction(async (tx) => {
       // Live stock check against the cached on-hand total.
@@ -114,7 +136,8 @@ export class OrdersService {
           taxCents,
           deliveryFeeCents,
           totalCents,
-          couponCode: discountCents > 0 ? dto.couponCode?.trim().toUpperCase() : null,
+          couponCode:
+            discountCents > 0 || freeDelivery ? dto.couponCode?.trim().toUpperCase() : null,
           deliveryAddress: dto.deliveryAddress ?? null,
           deliverySlot: dto.deliverySlot ?? null,
           notes: dto.notes ?? null,

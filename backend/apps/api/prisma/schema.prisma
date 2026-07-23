@@ -479,6 +479,7 @@ model OrderStatusHistory {
 enum CouponType {
   percent
   flat
+  free_delivery
 }
 
 model Coupon {
