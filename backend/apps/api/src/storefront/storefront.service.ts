@@ -11,7 +11,7 @@ import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import * as bcrypt from "bcryptjs";
 import { PrismaService } from "../prisma/prisma.service";
-import { OrdersService } from "../orders/orders.service";
+import { COUPON_MESSAGES, OrdersService } from "../orders/orders.service";
 import { PaymentsService } from "../payments/payments.service";
 import { SmsService } from "./sms.service";
 import type { AddressDto, CheckoutDto, CustomerLoginDto, CustomerRegisterDto, SetCartDto } from "./dto";
@@ -473,24 +473,30 @@ export class StorefrontService {
     return { order, payment };
   }
 
-  /** Validate a promo code against a subtotal, returning the discount. */
-  async validateCoupon(organizationId: string, code: string, subtotalCents: number) {
-    const { discountCents, freeDelivery } = await this.orders.resolveCoupon(
+  /** Validate a promo code against a subtotal, returning the discount. When the
+   *  shopper is signed in, per-customer usage rules are checked too. */
+  async validateCoupon(
+    organizationId: string,
+    code: string,
+    subtotalCents: number,
+    customerId?: string,
+  ) {
+    const { discountCents, freeDelivery, valid, reason } = await this.orders.resolveCoupon(
       organizationId,
       code,
       subtotalCents,
+      customerId,
     );
-    const valid = discountCents > 0 || freeDelivery;
     return {
       code: code.trim().toUpperCase(),
       valid,
       discountCents,
       freeDelivery,
-      message: freeDelivery
-        ? "Free delivery unlocked 🎉"
-        : discountCents > 0
-          ? `You saved ₹${(discountCents / 100).toFixed(0)}`
-          : "This code isn't valid for your cart.",
+      message: !valid
+        ? COUPON_MESSAGES[reason]
+        : freeDelivery
+          ? "Free delivery unlocked 🎉"
+          : `You saved ₹${(discountCents / 100).toFixed(0)}`,
     };
   }
 

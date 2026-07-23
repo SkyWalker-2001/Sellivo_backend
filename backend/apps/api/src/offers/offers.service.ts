@@ -27,6 +27,9 @@ export class OffersService {
         value: dto.type === "free_delivery" ? 0 : (dto.value ?? 0),
         minSubtotalCents: dto.minSubtotalCents ?? 0,
         active: dto.active ?? true,
+        maxRedemptions: dto.maxRedemptions ?? null,
+        perCustomerLimit: dto.perCustomerLimit ?? null,
+        expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
       },
     });
   }
@@ -41,6 +44,9 @@ export class OffersService {
         value: dto.type === "free_delivery" ? 0 : (dto.value ?? 0),
         minSubtotalCents: dto.minSubtotalCents ?? 0,
         active: dto.active ?? true,
+        maxRedemptions: dto.maxRedemptions ?? null,
+        perCustomerLimit: dto.perCustomerLimit ?? null,
+        expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : null,
       },
     });
   }

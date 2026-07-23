@@ -15,7 +15,7 @@ import {
   ValidateCouponDto,
 } from "./dto";
 import { Public } from "../common/decorators";
-import { CurrentCustomer, CustomerAuthGuard } from "./customer-auth";
+import { CurrentCustomer, CustomerAuthGuard, OptionalCustomerAuthGuard } from "./customer-auth";
 import type { AuthCustomer } from "./customer-auth";
 
 @ApiTags("storefront")
@@ -150,11 +150,16 @@ export class StorefrontController {
   }
 
   @Public()
+  @UseGuards(OptionalCustomerAuthGuard)
   @Post("orgs/:orgId/coupons/validate")
   @HttpCode(200)
   @ApiOperation({ summary: "Validate a promo code against a subtotal" })
-  validateCoupon(@Param("orgId") orgId: string, @Body() dto: ValidateCouponDto) {
-    return this.storefront.validateCoupon(orgId, dto.code, dto.subtotalCents);
+  validateCoupon(
+    @Param("orgId") orgId: string,
+    @Body() dto: ValidateCouponDto,
+    @CurrentCustomer("customerId") customerId?: string,
+  ) {
+    return this.storefront.validateCoupon(orgId, dto.code, dto.subtotalCents, customerId);
   }
 
   @Public()

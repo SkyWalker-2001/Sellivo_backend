@@ -39,6 +39,16 @@ export class CustomerJwtStrategy extends PassportStrategy(Strategy, "jwt-custome
 @Injectable()
 export class CustomerAuthGuard extends AuthGuard("jwt-customer") {}
 
+/** Like CustomerAuthGuard but never rejects: attaches the shopper when a valid
+ *  token is present, otherwise leaves the request anonymous. Use on endpoints
+ *  that work for guests but personalize when signed in. */
+@Injectable()
+export class OptionalCustomerAuthGuard extends CustomerAuthGuard {
+  handleRequest<T = AuthCustomer>(_err: unknown, user: T | false): T | undefined {
+    return user || undefined;
+  }
+}
+
 /** Inject the current shopper (or one of its fields). */
 export const CurrentCustomer = createParamDecorator(
   (field: keyof AuthCustomer | undefined, ctx: ExecutionContext) => {

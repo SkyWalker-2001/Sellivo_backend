@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import type { OrderStatus, Prisma } from "@prisma/client";
+import type { Coupon, OrderStatus, Prisma } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
 import { InventoryService } from "../inventory/inventory.service";
 import { EventsGateway } from "../events/events.gateway";
@@ -16,6 +16,32 @@ import type { CreateOrderDto } from "./dto";
 const GST_RATE = 0.05; // 5% GST, already included in the selling price
 const DELIVERY_FEE_CENTS = 2500; // ₹25 delivery
 const FREE_DELIVERY_THRESHOLD_CENTS = 50000; // free over ₹500
+
+// Why a coupon isn't (or is) applicable — drives the shopper-facing message.
+export type CouponReason =
+  | "ok"
+  | "invalid"
+  | "expired"
+  | "min_not_met"
+  | "usage_limit"
+  | "already_used";
+
+export const COUPON_MESSAGES: Record<CouponReason, string> = {
+  ok: "",
+  invalid: "This code isn't valid for your cart.",
+  expired: "This code has expired.",
+  min_not_met: "Your cart doesn't meet the minimum for this code.",
+  usage_limit: "This code has reached its usage limit.",
+  already_used: "You've already used this code.",
+};
+
+export interface CouponResolution {
+  discountCents: number;
+  freeDelivery: boolean;
+  valid: boolean;
+  reason: CouponReason;
+  coupon: Coupon | null;
+}
 
 @Injectable()
 export class OrdersService {
@@ -37,30 +63,56 @@ export class OrdersService {
     return (await this.resolveCoupon(organizationId, code, subtotalCents)).discountCents;
   }
 
-  /**
-   * Resolve a coupon to its full effect: a subtotal discount and/or a waived
-   * delivery fee. Returns zeros when the code is unknown/inactive or the minimum
-   * spend isn't met.
-   */
-  async resolveCoupon(
-    organizationId: string,
-    code: string | undefined,
+  /** The price effect of a valid coupon: a discount and/or a waived delivery fee. */
+  private couponEffect(
+    coupon: Coupon,
     subtotalCents: number,
-  ): Promise<{ discountCents: number; freeDelivery: boolean }> {
-    const none = { discountCents: 0, freeDelivery: false };
-    if (!code) return none;
-    const coupon = await this.prisma.coupon.findFirst({
-      where: { organizationId, code: code.trim().toUpperCase(), active: true },
-    });
-    if (!coupon || subtotalCents < coupon.minSubtotalCents) return none;
-    if (coupon.type === "free_delivery") {
-      return { discountCents: 0, freeDelivery: true };
-    }
+  ): { discountCents: number; freeDelivery: boolean } {
+    if (coupon.type === "free_delivery") return { discountCents: 0, freeDelivery: true };
     const raw =
       coupon.type === "percent"
         ? Math.round((subtotalCents * coupon.value) / 100)
         : coupon.value;
     return { discountCents: Math.min(raw, subtotalCents), freeDelivery: false };
+  }
+
+  /**
+   * Resolve a coupon to its full effect + eligibility for the given cart and (if
+   * known) customer. Checks active/expiry/minimum spend and usage rules (total
+   * cap + per-customer limit). This is advisory for previews; order creation
+   * re-checks and reserves the redemption atomically.
+   */
+  async resolveCoupon(
+    organizationId: string,
+    code: string | undefined,
+    subtotalCents: number,
+    customerId?: string,
+  ): Promise<CouponResolution> {
+    const fail = (reason: CouponReason, coupon: Coupon | null = null): CouponResolution => ({
+      discountCents: 0,
+      freeDelivery: false,
+      valid: false,
+      reason,
+      coupon,
+    });
+    if (!code) return fail("invalid");
+    const coupon = await this.prisma.coupon.findFirst({
+      where: { organizationId, code: code.trim().toUpperCase(), active: true },
+    });
+    if (!coupon) return fail("invalid");
+    if (coupon.expiresAt && coupon.expiresAt.getTime() <= Date.now()) return fail("expired", coupon);
+    if (subtotalCents < coupon.minSubtotalCents) return fail("min_not_met", coupon);
+    if (coupon.maxRedemptions != null && coupon.redeemedCount >= coupon.maxRedemptions) {
+      return fail("usage_limit", coupon);
+    }
+    if (customerId && coupon.perCustomerLimit != null) {
+      const used = await this.prisma.couponRedemption.count({
+        where: { couponId: coupon.id, customerId },
+      });
+      if (used >= coupon.perCustomerLimit) return fail("already_used", coupon);
+    }
+    const { discountCents, freeDelivery } = this.couponEffect(coupon, subtotalCents);
+    return { discountCents, freeDelivery, valid: true, reason: "ok", coupon };
   }
 
   /**
@@ -97,11 +149,26 @@ export class OrdersService {
     const subtotalCents = lines.reduce((s, l) => s + l.totalCents, 0);
 
     // Bill breakdown (server-authoritative): discount → GST → delivery.
-    const { discountCents, freeDelivery } = await this.resolveCoupon(
+    const resolution = await this.resolveCoupon(
       organizationId,
       dto.couponCode,
       subtotalCents,
+      dto.customerId,
     );
+    // A code that fails a hard rule (expired / usage limit) should stop checkout
+    // rather than silently charge full price. Unknown codes / below-minimum stay
+    // lenient: the order proceeds without a discount.
+    if (
+      dto.couponCode &&
+      !resolution.valid &&
+      (resolution.reason === "expired" ||
+        resolution.reason === "usage_limit" ||
+        resolution.reason === "already_used")
+    ) {
+      throw new BadRequestException(COUPON_MESSAGES[resolution.reason]);
+    }
+    const { discountCents, freeDelivery, coupon } = resolution;
+    const couponApplied = resolution.valid && !!coupon && (discountCents > 0 || freeDelivery);
     const taxedBase = subtotalCents - discountCents;
     // GST-inclusive: tax is the portion already embedded in taxedBase, not an add-on.
     const taxCents = Math.round((taxedBase * GST_RATE) / (1 + GST_RATE));
@@ -124,6 +191,34 @@ export class OrdersService {
         }
       }
 
+      // Reserve the coupon redemption. The row update takes a lock so concurrent
+      // checkouts of the same code serialize here — making the caps race-safe.
+      if (couponApplied && coupon) {
+        if (coupon.maxRedemptions != null) {
+          const reserved = await tx.coupon.updateMany({
+            where: { id: coupon.id, redeemedCount: { lt: coupon.maxRedemptions } },
+            data: { redeemedCount: { increment: 1 } },
+          });
+          if (reserved.count === 0) {
+            throw new BadRequestException(COUPON_MESSAGES.usage_limit);
+          }
+        } else {
+          await tx.coupon.update({
+            where: { id: coupon.id },
+            data: { redeemedCount: { increment: 1 } },
+          });
+        }
+        // Now that we hold the row lock, the per-customer count is authoritative.
+        if (dto.customerId && coupon.perCustomerLimit != null) {
+          const used = await tx.couponRedemption.count({
+            where: { couponId: coupon.id, customerId: dto.customerId },
+          });
+          if (used >= coupon.perCustomerLimit) {
+            throw new BadRequestException(COUPON_MESSAGES.already_used);
+          }
+        }
+      }
+
       const order = await tx.order.create({
         data: {
           organizationId,
@@ -136,8 +231,7 @@ export class OrdersService {
           taxCents,
           deliveryFeeCents,
           totalCents,
-          couponCode:
-            discountCents > 0 || freeDelivery ? dto.couponCode?.trim().toUpperCase() : null,
+          couponCode: couponApplied ? dto.couponCode?.trim().toUpperCase() : null,
           deliveryAddress: dto.deliveryAddress ?? null,
           deliverySlot: dto.deliverySlot ?? null,
           notes: dto.notes ?? null,
@@ -155,6 +249,13 @@ export class OrdersService {
           reason: "sale_online",
           source: "web",
           refId: order.id,
+        });
+      }
+
+      // Record the redemption against the order (reservation was made above).
+      if (couponApplied && coupon) {
+        await tx.couponRedemption.create({
+          data: { couponId: coupon.id, customerId: dto.customerId ?? null, orderId: order.id },
         });
       }
 
@@ -264,6 +365,18 @@ export class OrdersService {
             source: "system",
             refId: id,
           });
+        }
+        // Release any coupon redemption tied to this order so single-use /
+        // limited codes aren't burned on a cancelled order.
+        const released = await tx.couponRedemption.findMany({ where: { orderId: id } });
+        for (const r of released) {
+          await tx.coupon.update({
+            where: { id: r.couponId },
+            data: { redeemedCount: { decrement: 1 } },
+          });
+        }
+        if (released.length > 0) {
+          await tx.couponRedemption.deleteMany({ where: { orderId: id } });
         }
       }
       return u;
