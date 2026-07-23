@@ -176,6 +176,10 @@ model Customer {
   phone          String?
   passwordHash   String?
   name           String?
+  // Owner controls: block a customer (can't sign in / order) and keep a
+  // private note about them (never shown to the shopper).
+  blocked        Boolean  @default(false)
+  ownerNote      String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

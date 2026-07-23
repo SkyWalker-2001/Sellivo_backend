@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -14,13 +15,22 @@ import { PrismaService } from "../prisma/prisma.service";
 import { COUPON_MESSAGES, OrdersService } from "../orders/orders.service";
 import { PaymentsService } from "../payments/payments.service";
 import { SmsService } from "./sms.service";
-import type { AddressDto, CheckoutDto, CustomerLoginDto, CustomerRegisterDto, SetCartDto } from "./dto";
+import type {
+  AddressDto,
+  CheckoutDto,
+  CustomerLoginDto,
+  CustomerRegisterDto,
+  SetCartDto,
+  UpdateProfileDto,
+} from "./dto";
 import type { CustomerTokenPayload } from "./customer-auth";
 
 interface OtpEntry {
   code: string;
   expiresAt: number;
 }
+
+const BLOCKED_MESSAGE = "This account has been blocked. Please contact the store.";
 
 @Injectable()
 export class StorefrontService {
@@ -84,6 +94,7 @@ export class StorefrontService {
     if (!customer?.passwordHash) throw new UnauthorizedException("Invalid credentials");
     const ok = await bcrypt.compare(dto.password, customer.passwordHash);
     if (!ok) throw new UnauthorizedException("Invalid credentials");
+    if (customer.blocked) throw new ForbiddenException(BLOCKED_MESSAGE);
     return this.issueToken(customer.id, organizationId);
   }
 
@@ -128,6 +139,7 @@ export class StorefrontService {
     let customer = await this.prisma.customer.findFirst({
       where: { organizationId, phone: normalized },
     });
+    if (customer?.blocked) throw new ForbiddenException(BLOCKED_MESSAGE);
     customer ??= await this.prisma.customer.create({
       data: { organizationId, phone: normalized, name: name?.trim() || null },
     });
@@ -180,6 +192,7 @@ export class StorefrontService {
     let customer = await this.prisma.customer.findFirst({
       where: { organizationId, email },
     });
+    if (customer?.blocked) throw new ForbiddenException(BLOCKED_MESSAGE);
     customer ??= await this.prisma.customer.create({
       data: { organizationId, email, name: claims.name?.trim() || null },
     });
@@ -189,10 +202,44 @@ export class StorefrontService {
   async me(customerId: string) {
     const c = await this.prisma.customer.findUnique({
       where: { id: customerId },
-      select: { id: true, name: true, email: true, phone: true, organizationId: true },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        organizationId: true,
+        blocked: true,
+      },
     });
     if (!c) throw new UnauthorizedException();
-    return c;
+    if (c.blocked) throw new ForbiddenException(BLOCKED_MESSAGE);
+    return {
+      ...c,
+      // The shopper must have a name and a mobile number before using the app.
+      profileComplete: !!(c.name && c.name.trim() && c.phone && c.phone.trim()),
+    };
+  }
+
+  /** Complete/update the signed-in shopper's profile (name + mobile number). */
+  async updateProfile(customerId: string, dto: UpdateProfileDto) {
+    const name = dto.name.trim();
+    const phone = dto.phone.trim();
+    if (!name) throw new BadRequestException("Name is required");
+    if (!/^\+?[0-9]{10,15}$/.test(phone)) {
+      throw new BadRequestException("Enter a valid mobile number");
+    }
+    const me = await this.prisma.customer.findUnique({ where: { id: customerId } });
+    if (!me) throw new UnauthorizedException();
+    // Phone is unique per org — surface a friendly conflict.
+    const clash = await this.prisma.customer.findFirst({
+      where: { organizationId: me.organizationId, phone, id: { not: customerId } },
+    });
+    if (clash) throw new ConflictException("That mobile number is already in use");
+    await this.prisma.customer.update({
+      where: { id: customerId },
+      data: { name, phone },
+    });
+    return this.me(customerId);
   }
 
   // ── Catalog (public) ─────────────────────────────────────────────────────────
@@ -437,6 +484,9 @@ export class StorefrontService {
 
   // ── Checkout & orders (customer) ──────────────────────────────────────────────
   async checkout(organizationId: string, customerId: string, dto: CheckoutDto) {
+    // A blocked customer (blocked after their token was issued) can't order.
+    const buyer = await this.prisma.customer.findUnique({ where: { id: customerId } });
+    if (buyer?.blocked) throw new ForbiddenException(BLOCKED_MESSAGE);
     // Resolve the chosen address (if any) to a formatted, stored snapshot.
     let deliveryAddress: string | undefined;
     if (dto.addressId) {

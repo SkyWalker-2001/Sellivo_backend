@@ -12,6 +12,7 @@ import {
   OtpRequestDto,
   OtpVerifyDto,
   SetCartDto,
+  UpdateProfileDto,
   ValidateCouponDto,
 } from "./dto";
 import { Public } from "../common/decorators";
@@ -147,6 +148,18 @@ export class StorefrontController {
   @Get("auth/me")
   me(@CurrentCustomer("customerId") customerId: string) {
     return this.storefront.me(customerId);
+  }
+
+  @Public()
+  @UseGuards(CustomerAuthGuard)
+  @ApiBearerAuth()
+  @Patch("auth/me")
+  @ApiOperation({ summary: "Complete/update the shopper's name + mobile" })
+  updateProfile(
+    @CurrentCustomer("customerId") customerId: string,
+    @Body() dto: UpdateProfileDto,
+  ) {
+    return this.storefront.updateProfile(customerId, dto);
   }
 
   @Public()

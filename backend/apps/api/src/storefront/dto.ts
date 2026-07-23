@@ -207,6 +207,18 @@ export class OtpVerifyDto {
   name?: string;
 }
 
+export class UpdateProfileDto {
+  @ApiProperty({ example: "Aditi Sharma" })
+  @IsString()
+  @IsNotEmpty()
+  name!: string;
+
+  @ApiProperty({ example: "+919876543210" })
+  @IsString()
+  @IsNotEmpty()
+  phone!: string;
+}
+
 export class CreateReviewDto {
   @ApiProperty({ example: 5, minimum: 1, maximum: 5 })
   @IsInt()
