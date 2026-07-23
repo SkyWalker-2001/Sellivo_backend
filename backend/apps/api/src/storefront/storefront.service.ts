@@ -348,14 +348,22 @@ export class StorefrontService {
         id: true,
         name: true,
         parentId: true,
+        image: true,
+        color: true,
+        description: true,
+        displayOrder: true,
         _count: { select: { products: true } },
       },
-      orderBy: { name: "asc" },
+      orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
     });
     return categories.map((c) => ({
       id: c.id,
       name: c.name,
       parentId: c.parentId,
+      image: c.image,
+      color: c.color,
+      description: c.description,
+      displayOrder: c.displayOrder,
       productCount: c._count.products,
     }));
   }
