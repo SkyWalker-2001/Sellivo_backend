@@ -23,6 +23,12 @@ export const DEFAULT_LAYOUT: DefaultSection[] = [
     dataSource: { kind: "categories" },
   },
   {
+    type: "category_department",
+    enabled: true,
+    config: { title: "Browse by department" },
+    dataSource: { kind: "categories" },
+  },
+  {
     type: "flash_sale",
     enabled: true,
     config: { title: "Flash deals", icon: "bolt" },
@@ -60,6 +66,7 @@ export const SECTION_TYPES = [
   "hero_banner",
   "category_grid",
   "horizontal_category",
+  "category_department",
   "flash_sale",
   "todays_deals",
   "best_seller",

@@ -68,6 +68,13 @@ export class StorefrontController {
   }
 
   @Public()
+  @Get("orgs/:orgId/categories/tree")
+  @ApiOperation({ summary: "Category forest (departments → sub-categories)" })
+  categoryTree(@Param("orgId") orgId: string) {
+    return this.storefront.categoryTree(orgId);
+  }
+
+  @Public()
   @Get("orgs/:orgId/products/:id")
   @ApiOperation({ summary: "Public product detail" })
   getProduct(@Param("orgId") orgId: string, @Param("id") id: string) {

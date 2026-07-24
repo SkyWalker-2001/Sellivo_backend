@@ -25,6 +25,15 @@ import type {
 } from "./dto";
 import type { CustomerTokenPayload } from "./customer-auth";
 
+export interface CategoryNode {
+  id: string;
+  name: string;
+  image: string | null;
+  color: string | null;
+  productCount: number;
+  children: CategoryNode[];
+}
+
 interface OtpEntry {
   code: string;
   expiresAt: number;
@@ -276,7 +285,11 @@ export class StorefrontService {
     const products = await this.prisma.product.findMany({
       where: {
         organizationId,
-        ...(opts.categoryId ? { categoryId: opts.categoryId } : {}),
+        // Match the category itself OR any of its direct children, so opening a
+        // parent department shows every product across its sub-categories.
+        ...(opts.categoryId
+          ? { category: { OR: [{ id: opts.categoryId }, { parentId: opts.categoryId }] } }
+          : {}),
         ...(opts.minPrice != null || opts.maxPrice != null
           ? {
               variants: {
@@ -366,6 +379,54 @@ export class StorefrontService {
       displayOrder: c.displayOrder,
       productCount: c._count.products,
     }));
+  }
+
+  /**
+   * The category forest for the "browse by department" home block and the
+   * department detail rail. Each node carries its subtree product count; empty
+   * branches (no products anywhere below) are pruned.
+   */
+  async categoryTree(organizationId: string) {
+    const cats = await this.prisma.category.findMany({
+      where: { organizationId, isActive: true },
+      select: {
+        id: true,
+        name: true,
+        parentId: true,
+        image: true,
+        color: true,
+        displayOrder: true,
+        _count: { select: { products: true } },
+      },
+      orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
+    });
+
+    const byParent = new Map<string | null, typeof cats>();
+    for (const c of cats) {
+      const key = c.parentId ?? null;
+      const arr = byParent.get(key) ?? [];
+      arr.push(c);
+      byParent.set(key, arr);
+    }
+
+    const build = (parentId: string | null): CategoryNode[] =>
+      (byParent.get(parentId) ?? [])
+        .map((c) => {
+          const children = build(c.id);
+          const productCount =
+            c._count.products + children.reduce((s, ch) => s + ch.productCount, 0);
+          return {
+            id: c.id,
+            name: c.name,
+            image: c.image,
+            color: c.color,
+            productCount,
+            children,
+          };
+        })
+        .filter((n) => n.productCount > 0);
+
+    return build(null);
   }
 
   async getProduct(organizationId: string, id: string) {
